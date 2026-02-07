@@ -1,0 +1,63 @@
+[package]
+name = "screenshot-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSNotification", "NSString", "NSDictionary", "NSThread", "NSRunLoop", "NSDate", "NSTimer", "NSArray", "NSValue", "NSAttributedString"] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSMenu",
+    "NSMenuItem",
+    "NSWindow",
+    "NSView",
+    "NSPanel",
+    "NSScreen",
+    "NSEvent",
+    "NSImage",
+    "NSImageRep",
+    "NSBitmapImageRep",
+    "NSTextField",
+    "NSColor",
+    "NSCursor",
+    "NSGraphicsContext",
+    "NSSavePanel",
+    "NSPasteboard",
+    "NSButton",
+    "NSControl",
+    "NSCell",
+    "NSButtonCell",
+    "NSActionCell",
+    "NSTrackingArea",
+    "NSFont",
+    "NSText",
+    "NSBezierPath",
+    "NSAlert",
+    "NSGestureRecognizer",
+    "NSClickGestureRecognizer",
+] }
+objc2-core-graphics = { version = "0.3", features = [
+    "CGContext",
+    "CGImage",
+    "CGColorSpace",
+    "CGGeometry",
+    "CGWindowLevel",
+    "CGWindow",
+    "CGDirectDisplay",
+] }
+objc2-core-foundation = { version = "0.3", features = [
+    "CFCGTypes",
+    "CFString",
+    "CFArray",
+    "CFDictionary",
+    "CFNumber",
+] }
+global-hotkey = "0.7"
+arboard = "3"
+image = { version = "0.25", default-features = false, features = ["png"] }

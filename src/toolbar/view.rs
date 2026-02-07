@@ -1,0 +1,116 @@
+use objc2::rc::Retained;
+use objc2::runtime::Sel;
+use objc2::{define_class, msg_send, MainThreadOnly};
+use objc2_app_kit::{NSButton, NSEvent, NSFont, NSView};
+use objc2_core_foundation::{CGFloat, CGPoint, CGSize};
+use objc2_foundation::{MainThreadMarker, NSRect, NSString};
+
+const BUTTON_W: CGFloat = 28.0;
+const BUTTON_H: CGFloat = 24.0;
+const BUTTON_SPACING: CGFloat = 2.0;
+const TOOLBAR_PADDING: CGFloat = 4.0;
+
+const TOOL_BUTTONS: &[(&str, &str)] = &[
+    ("\u{2196}", "toolSelect:"),  // ↖ Select
+    ("\u{2192}", "toolArrow:"),   // → Arrow
+    ("\u{25A1}", "toolRect:"),    // □ Rectangle
+    ("\u{25CB}", "toolEllipse:"), // ○ Ellipse
+    ("\u{270E}", "toolPencil:"),  // ✎ Pencil
+    ("T", "toolText:"),           // Text
+];
+
+const COLOR_BUTTONS: &[(&str, &str)] = &[
+    ("R", "colorRed:"),
+    ("B", "colorBlue:"),
+    ("G", "colorGreen:"),
+    ("Y", "colorYellow:"),
+];
+
+const ACTION_BUTTONS: &[(&str, &str)] = &[
+    ("\u{21A9}", "actionUndo:"),    // ↩ Undo
+    ("\u{2715}", "actionCancel:"),  // ✕ Cancel
+    ("S", "actionSave:"),           // Save
+    ("\u{2713}", "actionConfirm:"), // ✓ Confirm
+];
+
+pub struct ToolbarViewIvars {}
+
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "ToolbarView"]
+    #[ivars = ToolbarViewIvars]
+    pub struct ToolbarView;
+
+    impl ToolbarView {
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+            true
+        }
+    }
+);
+
+impl ToolbarView {
+    pub fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let total_buttons = TOOL_BUTTONS.len() + COLOR_BUTTONS.len() + ACTION_BUTTONS.len() + 2;
+        let width =
+            TOOLBAR_PADDING * 2.0 + total_buttons as CGFloat * (BUTTON_W + BUTTON_SPACING);
+        let height = TOOLBAR_PADDING * 2.0 + BUTTON_H;
+
+        let frame = NSRect::new(CGPoint::ZERO, CGSize::new(width, height));
+        let this = mtm.alloc().set_ivars(ToolbarViewIvars {});
+        let view: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
+
+        let mut x = TOOLBAR_PADDING;
+
+        for (label, sel_name) in TOOL_BUTTONS {
+            let btn = create_button(mtm, label, sel_name, x, TOOLBAR_PADDING);
+            view.addSubview(&btn);
+            x += BUTTON_W + BUTTON_SPACING;
+        }
+
+        x += BUTTON_SPACING * 2.0;
+
+        for (label, sel_name) in COLOR_BUTTONS {
+            let btn = create_button(mtm, label, sel_name, x, TOOLBAR_PADDING);
+            view.addSubview(&btn);
+            x += BUTTON_W + BUTTON_SPACING;
+        }
+
+        x += BUTTON_SPACING * 2.0;
+
+        for (label, sel_name) in ACTION_BUTTONS {
+            let btn = create_button(mtm, label, sel_name, x, TOOLBAR_PADDING);
+            view.addSubview(&btn);
+            x += BUTTON_W + BUTTON_SPACING;
+        }
+
+        view
+    }
+}
+
+fn create_button(
+    mtm: MainThreadMarker,
+    label: &str,
+    sel_name: &str,
+    x: CGFloat,
+    y: CGFloat,
+) -> Retained<NSButton> {
+    let frame = NSRect::new(CGPoint::new(x, y), CGSize::new(BUTTON_W, BUTTON_H));
+    let sel_cstr = std::ffi::CString::new(sel_name).unwrap();
+    let button: Retained<NSButton> = unsafe { msg_send![mtm.alloc(), initWithFrame: frame] };
+    button.setTitle(&NSString::from_str(label));
+    unsafe {
+        button.setAction(Some(Sel::register(&sel_cstr)));
+        button.setTarget(None);
+    }
+    button.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+    #[allow(deprecated)]
+    button.setBezelStyle(objc2_app_kit::NSBezelStyle::Inline);
+    button
+}
