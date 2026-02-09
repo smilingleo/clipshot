@@ -67,6 +67,10 @@ objc2-av-foundation = { version = "0.3", features = [
     "AVAssetWriterInput",
     "AVMediaFormat",
     "AVVideoSettings",
+    "AVAsset",
+    "AVAssetReader",
+    "AVAssetReaderOutput",
+    "AVAssetTrack",
     "block2",
     "objc2-core-media",
     "objc2-core-video",
@@ -75,6 +79,7 @@ objc2-core-media = { version = "0.3", features = [
     "CMTime",
     "CMSampleBuffer",
     "CMFormatDescription",
+    "objc2-core-video",
 ] }
 objc2-core-video = { version = "0.3", features = [
     "CVBase",

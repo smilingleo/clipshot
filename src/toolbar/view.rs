@@ -26,6 +26,10 @@ const COLOR_BUTTONS: &[(&str, &str)] = &[
     ("Y", "colorYellow:"),
 ];
 
+const PLAYBACK_BUTTONS: &[(&str, &str)] = &[
+    ("\u{25B6}", "editorPlayPause:"), // ▶ Play/Pause
+];
+
 const ACTION_BUTTONS: &[(&str, &str)] = &[
     ("\u{21A9}", "actionUndo:"),    // ↩ Undo
     ("\u{2715}", "actionCancel:"),  // ✕ Cancel
@@ -57,7 +61,12 @@ define_class!(
 
 impl ToolbarView {
     pub fn new(mtm: MainThreadMarker) -> Retained<Self> {
-        let total_buttons = TOOL_BUTTONS.len() + COLOR_BUTTONS.len() + ACTION_BUTTONS.len() + 2;
+        // +3 for the spacing gaps between groups (tools|colors|playback|actions)
+        let total_buttons = TOOL_BUTTONS.len()
+            + COLOR_BUTTONS.len()
+            + PLAYBACK_BUTTONS.len()
+            + ACTION_BUTTONS.len()
+            + 3;
         let width =
             TOOLBAR_PADDING * 2.0 + total_buttons as CGFloat * (BUTTON_W + BUTTON_SPACING);
         let height = TOOLBAR_PADDING * 2.0 + BUTTON_H;
@@ -77,6 +86,14 @@ impl ToolbarView {
         x += BUTTON_SPACING * 2.0;
 
         for (label, sel_name) in COLOR_BUTTONS {
+            let btn = create_button(mtm, label, sel_name, x, TOOLBAR_PADDING);
+            view.addSubview(&btn);
+            x += BUTTON_W + BUTTON_SPACING;
+        }
+
+        x += BUTTON_SPACING * 2.0;
+
+        for (label, sel_name) in PLAYBACK_BUTTONS {
             let btn = create_button(mtm, label, sel_name, x, TOOLBAR_PADDING);
             view.addSubview(&btn);
             x += BUTTON_W + BUTTON_SPACING;

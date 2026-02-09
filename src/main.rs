@@ -7,6 +7,7 @@ mod toolbar;
 mod annotation;
 mod actions;
 mod border;
+mod editor;
 mod encoder;
 mod recording;
 

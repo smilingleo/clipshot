@@ -12,6 +12,7 @@ use objc2_foundation::{
 };
 
 use crate::border::RecordingBorder;
+use crate::editor::window::EditorWindow;
 use crate::hotkey::HotkeyManager;
 use crate::overlay::view::ActiveTool;
 use crate::overlay::OverlayWindow;
@@ -32,6 +33,8 @@ pub struct AppDelegateIvars {
     recording_state: RefCell<Option<RecordingState>>,
     /// Click-through border window shown during recording
     recording_border: RefCell<Option<RecordingBorder>>,
+    /// Post-recording video editor
+    editor_window: RefCell<Option<EditorWindow>>,
 }
 
 define_class!(
@@ -90,9 +93,13 @@ define_class!(
                     let hk = hk.as_ref().unwrap();
 
                     if event.id() == hk.capture_hotkey_id {
-                        // Don't allow screenshot while recording
+                        // Don't allow screenshot while recording or editing
                         if self.ivars().recording_state.borrow().is_some() {
                             eprintln!("Cannot capture screenshot while recording");
+                            return;
+                        }
+                        if self.ivars().editor_window.borrow().is_some() {
+                            eprintln!("Cannot capture screenshot while editing");
                             return;
                         }
                         eprintln!("Capture hotkey pressed");
@@ -111,6 +118,10 @@ define_class!(
         fn capture_screenshot(&self, _sender: &AnyObject) {
             if self.ivars().recording_state.borrow().is_some() {
                 eprintln!("Cannot capture screenshot while recording");
+                return;
+            }
+            if self.ivars().editor_window.borrow().is_some() {
+                eprintln!("Cannot capture screenshot while editing");
                 return;
             }
             eprintln!("Capture triggered from menu!");
@@ -178,6 +189,11 @@ define_class!(
     impl AppDelegate {
         #[unsafe(method(actionUndo:))]
         fn action_undo(&self, _sender: &AnyObject) {
+            if let Some(ref editor) = *self.ivars().editor_window.borrow() {
+                let mtm = MainThreadMarker::from(self);
+                editor.undo_annotation(mtm);
+                return;
+            }
             if let Some(overlay) = self.ivars().overlay.borrow().as_ref() {
                 overlay.view.ivars().annotations.borrow_mut().pop();
                 overlay.view.setNeedsDisplay(true);
@@ -186,6 +202,11 @@ define_class!(
 
         #[unsafe(method(actionCancel:))]
         fn action_cancel(&self, _sender: &AnyObject) {
+            // If editor is open, close it and offer to save raw video
+            if self.ivars().editor_window.borrow().is_some() {
+                self.close_editor_and_save_raw();
+                return;
+            }
             self.ivars().recording_mode.set(false);
             self.dismiss_all();
         }
@@ -203,6 +224,12 @@ define_class!(
 
         #[unsafe(method(actionConfirm:))]
         fn action_confirm(&self, _sender: &AnyObject) {
+            // If editor is open, export with annotations
+            if self.ivars().editor_window.borrow().is_some() {
+                self.export_editor();
+                return;
+            }
+
             if self.ivars().recording_mode.get() {
                 // In recording mode, confirm starts recording with the selection
                 self.start_recording_with_selection();
@@ -246,6 +273,35 @@ define_class!(
             self.stop_recording();
         }
     }
+
+    // --- Editor actions ---
+    impl AppDelegate {
+        #[unsafe(method(editorPlayPause:))]
+        fn editor_play_pause(&self, _sender: &AnyObject) {
+            let mtm = MainThreadMarker::from(self);
+            let target: &AnyObject = unsafe { &*(self as *const Self as *const AnyObject) };
+            if let Some(ref editor) = *self.ivars().editor_window.borrow() {
+                editor.toggle_playback(target, mtm);
+            }
+        }
+
+        #[unsafe(method(editorAnnotationAdded:))]
+        fn editor_annotation_added(&self, _sender: &AnyObject) {
+            if let Some(ref editor) = *self.ivars().editor_window.borrow() {
+                if let Some(ann) = editor.view.take_pending_annotation() {
+                    editor.add_annotation(ann);
+                }
+            }
+        }
+
+        #[unsafe(method(editorTimerTick:))]
+        fn editor_timer_tick(&self, _timer: &NSObject) {
+            let mtm = MainThreadMarker::from(self);
+            if let Some(ref editor) = *self.ivars().editor_window.borrow() {
+                editor.advance_frame(mtm);
+            }
+        }
+    }
 );
 
 impl AppDelegate {
@@ -259,6 +315,7 @@ impl AppDelegate {
             recording_mode: Cell::new(false),
             recording_state: RefCell::new(None),
             recording_border: RefCell::new(None),
+            editor_window: RefCell::new(None),
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -283,6 +340,12 @@ impl AppDelegate {
         // If already recording, stop
         if self.ivars().recording_state.borrow().is_some() {
             self.stop_recording();
+            return;
+        }
+
+        // Don't start recording while editing
+        if self.ivars().editor_window.borrow().is_some() {
+            eprintln!("Cannot start recording while editing");
             return;
         }
 
@@ -411,12 +474,119 @@ impl AppDelegate {
             sb.exit_recording_mode(mtm);
         }
 
-        // Show save dialog for the MP4
+        eprintln!("Recording stopped");
+
+        // Open the editor instead of showing save dialog directly
         if let Some(tmp_path) = &recording.output_path {
-            self.show_save_dialog_for_recording(tmp_path, mtm);
+            self.open_editor(tmp_path, mtm);
+        }
+    }
+
+    fn open_editor(&self, video_path: &PathBuf, mtm: MainThreadMarker) {
+        match EditorWindow::open(video_path, mtm) {
+            Ok(editor) => {
+                // Show the toolbar near the editor window
+                self.show_editor_toolbar(mtm);
+                *self.ivars().editor_window.borrow_mut() = Some(editor);
+            }
+            Err(e) => {
+                eprintln!("Failed to open editor: {}", e);
+                // Fall back to save dialog for raw video
+                self.show_save_dialog_for_recording(video_path, mtm);
+            }
+        }
+    }
+
+    fn show_editor_toolbar(&self, mtm: MainThreadMarker) {
+        if let Some(toolbar) = self.ivars().toolbar.borrow().as_ref() {
+            // Position toolbar at top-center of screen for editor mode
+            let screen = objc2_app_kit::NSScreen::mainScreen(mtm).expect("no main screen");
+            let screen_frame = screen.frame();
+            let toolbar_size = toolbar.view.frame().size;
+            let x = (screen_frame.size.width - toolbar_size.width) / 2.0;
+            let y = screen_frame.size.height - toolbar_size.height - 40.0;
+            toolbar.panel.setFrameOrigin(objc2_core_foundation::CGPoint::new(x, y));
+            toolbar.panel.orderFrontRegardless();
+        }
+    }
+
+    fn export_editor(&self) {
+        let mtm = MainThreadMarker::from(self);
+
+        let editor_ref = self.ivars().editor_window.borrow();
+        let Some(ref editor) = *editor_ref else {
+            return;
+        };
+
+        // Commit any pending text field
+        editor.view.commit_text_field();
+
+        let state = editor.sessions();
+        let video_path = state.video_path.clone();
+        let sessions = &state.sessions;
+
+        // Create temp file for export
+        let export_path = std::env::temp_dir().join(format!(
+            "screenshot_export_{}.mp4",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        ));
+
+        // Check if there are any annotations at all
+        let has_annotations = sessions.iter().any(|s| !s.annotations.is_empty());
+
+        if has_annotations {
+            if let Err(e) =
+                crate::editor::export::export_with_annotations(&editor.decoder, sessions, &export_path)
+            {
+                eprintln!("Export failed: {}", e);
+                drop(state);
+                drop(editor_ref);
+                // Fall back to saving raw video
+                self.close_editor_and_save_raw();
+                return;
+            }
         }
 
-        eprintln!("Recording stopped");
+        drop(state);
+        drop(editor_ref);
+
+        // Close editor
+        if let Some(editor) = self.ivars().editor_window.borrow_mut().take() {
+            editor.close();
+        }
+        if let Some(toolbar) = self.ivars().toolbar.borrow().as_ref() {
+            toolbar.hide();
+        }
+
+        // Show save dialog
+        if has_annotations {
+            self.show_save_dialog_for_recording(&export_path, mtm);
+            // Clean up raw video
+            let _ = std::fs::remove_file(&video_path);
+        } else {
+            // No annotations: save the raw video directly
+            self.show_save_dialog_for_recording(&video_path, mtm);
+        }
+    }
+
+    fn close_editor_and_save_raw(&self) {
+        let mtm = MainThreadMarker::from(self);
+
+        let editor = self.ivars().editor_window.borrow_mut().take();
+        if let Some(editor) = editor {
+            let video_path = editor.state.borrow().video_path.clone();
+            editor.close();
+
+            if let Some(toolbar) = self.ivars().toolbar.borrow().as_ref() {
+                toolbar.hide();
+            }
+
+            // Offer to save the raw video
+            self.show_save_dialog_for_recording(&video_path, mtm);
+        }
     }
 
     fn show_save_dialog_for_recording(&self, tmp_path: &PathBuf, mtm: MainThreadMarker) {
@@ -447,12 +617,20 @@ impl AppDelegate {
     }
 
     fn set_active_tool(&self, tool: ActiveTool) {
+        if let Some(ref editor) = *self.ivars().editor_window.borrow() {
+            editor.view.ivars().active_tool.set(tool);
+            return;
+        }
         if let Some(overlay) = self.ivars().overlay.borrow().as_ref() {
             overlay.view.ivars().active_tool.set(tool);
         }
     }
 
     fn set_annotation_color(&self, color: (f64, f64, f64)) {
+        if let Some(ref editor) = *self.ivars().editor_window.borrow() {
+            editor.view.ivars().annotation_color.set(color);
+            return;
+        }
         if let Some(overlay) = self.ivars().overlay.borrow().as_ref() {
             overlay.view.ivars().annotation_color.set(color);
         }
