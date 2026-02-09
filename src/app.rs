@@ -11,6 +11,7 @@ use objc2_foundation::{
     MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSString, NSTimer,
 };
 
+use crate::border::RecordingBorder;
 use crate::hotkey::HotkeyManager;
 use crate::overlay::view::ActiveTool;
 use crate::overlay::OverlayWindow;
@@ -29,6 +30,8 @@ pub struct AppDelegateIvars {
     recording_mode: Cell<bool>,
     /// Active recording state (encoder + timer)
     recording_state: RefCell<Option<RecordingState>>,
+    /// Click-through border window shown during recording
+    recording_border: RefCell<Option<RecordingBorder>>,
 }
 
 define_class!(
@@ -56,6 +59,9 @@ define_class!(
 
             let toolbar = ToolbarWindow::new(mtm);
             *self.ivars().toolbar.borrow_mut() = Some(toolbar);
+
+            let border = RecordingBorder::new(mtm);
+            *self.ivars().recording_border.borrow_mut() = Some(border);
 
             // Set up a timer to poll for global hotkey events (100ms interval)
             let target: &AnyObject = unsafe { &*(self as *const Self as *const AnyObject) };
@@ -252,6 +258,7 @@ impl AppDelegate {
             captured_image: RefCell::new(None),
             recording_mode: Cell::new(false),
             recording_state: RefCell::new(None),
+            recording_border: RefCell::new(None),
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -362,6 +369,12 @@ impl AppDelegate {
         // Store temp path for later save dialog
         recording.output_path = Some(tmp_path);
 
+        // Show the border window around the recording region and exclude it from capture
+        if let Some(border) = self.ivars().recording_border.borrow().as_ref() {
+            border.show(selection, mtm);
+            recording.exclude_window_id = Some(border.window_number());
+        }
+
         *self.ivars().recording_state.borrow_mut() = Some(recording);
 
         // Update status bar
@@ -387,6 +400,11 @@ impl AppDelegate {
 
         // Finish encoding
         recording.encoder.finish();
+
+        // Hide the recording border
+        if let Some(border) = self.ivars().recording_border.borrow().as_ref() {
+            border.hide();
+        }
 
         // Exit recording mode in status bar
         if let Some(sb) = self.ivars().status_bar.borrow().as_ref() {

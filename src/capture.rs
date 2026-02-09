@@ -10,15 +10,34 @@ use objc2_core_graphics::CGWindowListCreateImage;
 /// Returns None if screen recording permission is not granted or capture fails.
 #[allow(deprecated)] // CGWindowListCreateImage deprecated in favor of ScreenCaptureKit
 pub fn capture_full_screen() -> Option<CFRetained<CGImage>> {
-    // Capture exactly the main display (not all displays).
-    // CGRect::ZERO is NOT CGRectNull — it would capture an incorrect region.
+    capture_full_screen_excluding(None)
+}
+
+/// Capture the main display, optionally excluding a specific window by its ID.
+/// When `exclude_window_id` is Some, captures everything on screen below that window,
+/// effectively excluding it from the capture.
+#[allow(deprecated)]
+pub fn capture_full_screen_excluding(
+    exclude_window_id: Option<u32>,
+) -> Option<CFRetained<CGImage>> {
     let display_id = CGMainDisplayID();
     let bounds = CGDisplayBounds(display_id);
 
+    let (list_option, window_id) = match exclude_window_id {
+        Some(wid) => (
+            CGWindowListOption::OptionOnScreenBelowWindow,
+            wid as CGWindowID,
+        ),
+        None => (
+            CGWindowListOption::OptionOnScreenOnly,
+            0 as CGWindowID,
+        ),
+    };
+
     let image = CGWindowListCreateImage(
         bounds,
-        CGWindowListOption::OptionOnScreenOnly,
-        0 as CGWindowID,
+        list_option,
+        window_id,
         CGWindowImageOption::BestResolution,
     );
 
