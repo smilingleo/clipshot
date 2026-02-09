@@ -13,6 +13,6 @@
     <key>LSUIElement</key>
     <true/>
     <key>NSScreenCaptureUsageDescription</key>
-    <string>Screenshot needs screen capture permission to take screenshots.</string>
+    <string>Screenshot needs screen capture permission to take screenshots and record screen video.</string>
 </dict>
 </plist>

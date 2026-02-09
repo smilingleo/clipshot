@@ -1,18 +1,20 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
-use objc2_app_kit::NSApplicationDelegate;
+use objc2_app_kit::{NSApplicationDelegate, NSModalResponseOK, NSSavePanel};
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
-    MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSTimer,
+    MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSString, NSTimer,
 };
 
 use crate::hotkey::HotkeyManager;
-use crate::overlay::OverlayWindow;
 use crate::overlay::view::ActiveTool;
+use crate::overlay::OverlayWindow;
+use crate::recording::RecordingState;
 use crate::statusbar::StatusBar;
 use crate::toolbar::ToolbarWindow;
 
@@ -23,6 +25,10 @@ pub struct AppDelegateIvars {
     toolbar: RefCell<Option<ToolbarWindow>>,
     /// The full-screen CGImage from the last capture (for cropping)
     captured_image: RefCell<Option<CFRetained<CGImage>>>,
+    /// True when the overlay is being used for recording region selection
+    recording_mode: Cell<bool>,
+    /// Active recording state (encoder + timer)
+    recording_state: RefCell<Option<RecordingState>>,
 }
 
 define_class!(
@@ -63,7 +69,7 @@ define_class!(
                 );
             }
 
-            eprintln!("Screenshot app started. Use Ctrl+Shift+A to capture.");
+            eprintln!("Screenshot app started. Ctrl+Shift+A=capture, Ctrl+Shift+R=record.");
         }
     }
 
@@ -74,8 +80,20 @@ define_class!(
             use global_hotkey::GlobalHotKeyEvent;
             if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
                 if event.state() == global_hotkey::HotKeyState::Pressed {
-                    eprintln!("Hotkey pressed, triggering capture...");
-                    self.do_capture();
+                    let hk = self.ivars().hotkey_manager.borrow();
+                    let hk = hk.as_ref().unwrap();
+
+                    if event.id() == hk.capture_hotkey_id {
+                        // Don't allow screenshot while recording
+                        if self.ivars().recording_state.borrow().is_some() {
+                            eprintln!("Cannot capture screenshot while recording");
+                            return;
+                        }
+                        eprintln!("Capture hotkey pressed");
+                        self.do_capture();
+                    } else if event.id() == hk.record_hotkey_id {
+                        self.handle_record_hotkey();
+                    }
                 }
             }
         }
@@ -85,6 +103,10 @@ define_class!(
     impl AppDelegate {
         #[unsafe(method(captureScreenshot:))]
         fn capture_screenshot(&self, _sender: &AnyObject) {
+            if self.ivars().recording_state.borrow().is_some() {
+                eprintln!("Cannot capture screenshot while recording");
+                return;
+            }
             eprintln!("Capture triggered from menu!");
             self.do_capture();
         }
@@ -158,6 +180,7 @@ define_class!(
 
         #[unsafe(method(actionCancel:))]
         fn action_cancel(&self, _sender: &AnyObject) {
+            self.ivars().recording_mode.set(false);
             self.dismiss_all();
         }
 
@@ -174,6 +197,13 @@ define_class!(
 
         #[unsafe(method(actionConfirm:))]
         fn action_confirm(&self, _sender: &AnyObject) {
+            if self.ivars().recording_mode.get() {
+                // In recording mode, confirm starts recording with the selection
+                self.start_recording_with_selection();
+                return;
+            }
+
+            // Normal screenshot mode: copy to clipboard
             if let Some(image) = self.get_final_image() {
                 if let Err(e) = crate::actions::copy_to_clipboard(&image) {
                     eprintln!("Clipboard error: {}", e);
@@ -191,6 +221,25 @@ define_class!(
             self.update_toolbar_position(mtm);
         }
     }
+
+    // --- Recording frame capture (called by NSTimer) ---
+    impl AppDelegate {
+        #[unsafe(method(captureRecordingFrame:))]
+        fn capture_recording_frame(&self, _timer: &NSObject) {
+            let mut state = self.ivars().recording_state.borrow_mut();
+            if let Some(ref mut recording) = *state {
+                recording.capture_frame();
+            }
+        }
+    }
+
+    // --- Stop recording (called from status bar menu) ---
+    impl AppDelegate {
+        #[unsafe(method(stopRecording:))]
+        fn stop_recording_action(&self, _sender: &AnyObject) {
+            self.stop_recording();
+        }
+    }
 );
 
 impl AppDelegate {
@@ -201,6 +250,8 @@ impl AppDelegate {
             overlay: RefCell::new(None),
             toolbar: RefCell::new(None),
             captured_image: RefCell::new(None),
+            recording_mode: Cell::new(false),
+            recording_state: RefCell::new(None),
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -219,6 +270,162 @@ impl AppDelegate {
             }
             *self.ivars().captured_image.borrow_mut() = Some(cg_image);
         }
+    }
+
+    fn handle_record_hotkey(&self) {
+        // If already recording, stop
+        if self.ivars().recording_state.borrow().is_some() {
+            self.stop_recording();
+            return;
+        }
+
+        // Set recording mode and show overlay for region selection
+        self.ivars().recording_mode.set(true);
+        eprintln!("Record hotkey pressed — select region then confirm");
+        self.do_capture();
+    }
+
+    fn start_recording_with_selection(&self) {
+        let mtm = MainThreadMarker::from(self);
+
+        // Read selection from overlay
+        let (selection, scale_factor) = {
+            let overlay_ref = self.ivars().overlay.borrow();
+            let overlay = match overlay_ref.as_ref() {
+                Some(o) => o,
+                None => return,
+            };
+            let sel = match overlay.view.ivars().selection.get() {
+                Some(s) => crate::overlay::view::normalize_rect(s),
+                None => {
+                    eprintln!("No selection for recording");
+                    return;
+                }
+            };
+            let sf = overlay.view.ivars().scale_factor.get();
+            (sel, sf)
+        };
+
+        // Dismiss overlay and toolbar
+        self.ivars().recording_mode.set(false);
+        self.dismiss_all();
+
+        // Calculate pixel dimensions (H.264 requires even dimensions)
+        let pixel_w = (selection.size.width * scale_factor) as usize & !1;
+        let pixel_h = (selection.size.height * scale_factor) as usize & !1;
+
+        if pixel_w == 0 || pixel_h == 0 {
+            eprintln!("Selection too small for recording");
+            return;
+        }
+
+        // Create temp file path
+        let tmp_path = std::env::temp_dir().join(format!(
+            "screenshot_recording_{}.mp4",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        ));
+
+        eprintln!("Starting recording: {}x{} -> {:?}", pixel_w, pixel_h, tmp_path);
+
+        // Create encoder
+        let encoder = match crate::encoder::VideoEncoder::new(&tmp_path, pixel_w, pixel_h, 30) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("Failed to create encoder: {}", e);
+                return;
+            }
+        };
+
+        // Start encoder
+        let mut recording = RecordingState::new(encoder, selection, scale_factor);
+        if let Err(e) = recording.encoder.start() {
+            eprintln!("Failed to start recording: {}", e);
+            return;
+        }
+
+        // Start ~30fps timer for frame capture
+        let target: &AnyObject = unsafe { &*(self as *const Self as *const AnyObject) };
+        let timer = unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                1.0 / 30.0,
+                target,
+                sel!(captureRecordingFrame:),
+                None,
+                true,
+            )
+        };
+        recording.timer = Some(timer);
+
+        // Store temp path for later save dialog
+        recording.output_path = Some(tmp_path);
+
+        *self.ivars().recording_state.borrow_mut() = Some(recording);
+
+        // Update status bar
+        if let Some(sb) = self.ivars().status_bar.borrow().as_ref() {
+            sb.enter_recording_mode(mtm);
+        }
+
+        eprintln!("Recording started");
+    }
+
+    fn stop_recording(&self) {
+        let mtm = MainThreadMarker::from(self);
+
+        let recording = self.ivars().recording_state.borrow_mut().take();
+        let Some(mut recording) = recording else {
+            return;
+        };
+
+        // Invalidate the timer
+        if let Some(timer) = recording.timer.take() {
+            timer.invalidate();
+        }
+
+        // Finish encoding
+        recording.encoder.finish();
+
+        // Exit recording mode in status bar
+        if let Some(sb) = self.ivars().status_bar.borrow().as_ref() {
+            sb.exit_recording_mode(mtm);
+        }
+
+        // Show save dialog for the MP4
+        if let Some(tmp_path) = &recording.output_path {
+            self.show_save_dialog_for_recording(tmp_path, mtm);
+        }
+
+        eprintln!("Recording stopped");
+    }
+
+    fn show_save_dialog_for_recording(&self, tmp_path: &PathBuf, mtm: MainThreadMarker) {
+        let panel = NSSavePanel::new(mtm);
+        panel.setNameFieldStringValue(&NSString::from_str("recording.mp4"));
+
+        let response = panel.runModal();
+        if response == NSModalResponseOK {
+            if let Some(url) = panel.URL() {
+                if let Some(path) = url.path() {
+                    let dest = path.to_string();
+                    if let Err(e) = std::fs::rename(tmp_path, &dest) {
+                        // rename may fail across filesystems, try copy
+                        if let Err(e2) = std::fs::copy(tmp_path, &dest) {
+                            eprintln!("Failed to save recording: rename={}, copy={}", e, e2);
+                        } else {
+                            let _ = std::fs::remove_file(tmp_path);
+                            eprintln!("Recording saved to {}", dest);
+                        }
+                    } else {
+                        eprintln!("Recording saved to {}", dest);
+                    }
+                }
+            }
+        }
+        // Clean up temp file if not saved
+        let _ = std::fs::remove_file(tmp_path);
     }
 
     fn set_active_tool(&self, tool: ActiveTool) {
@@ -268,9 +475,6 @@ impl AppDelegate {
                 let norm = crate::overlay::view::normalize_rect(selection);
                 if norm.size.width > 5.0 && norm.size.height > 5.0 {
                     toolbar.show_near_selection(norm, mtm);
-                    // Attach toolbar as child window of overlay to guarantee
-                    // it stacks above regardless of window level arithmetic.
-                    // NSWindowOrderingMode::Above = 1
                     let _: () = unsafe {
                         msg_send![&*overlay.window, addChildWindow: &*toolbar.panel, ordered: 1i64]
                     };

@@ -6,6 +6,8 @@ mod overlay;
 mod toolbar;
 mod annotation;
 mod actions;
+mod encoder;
+mod recording;
 
 use objc2::runtime::ProtocolObject;
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate};

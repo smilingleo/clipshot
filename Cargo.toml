@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSNotification", "NSString", "NSDictionary", "NSThread", "NSRunLoop", "NSDate", "NSTimer", "NSArray", "NSValue", "NSAttributedString"] }
+objc2-foundation = { version = "0.3", features = ["NSNotification", "NSString", "NSDictionary", "NSThread", "NSRunLoop", "NSDate", "NSTimer", "NSArray", "NSValue", "NSAttributedString", "NSURL", "NSError", "NSObject"] }
 objc2-app-kit = { version = "0.3", features = [
     "NSApplication",
     "NSResponder",
@@ -61,3 +61,27 @@ objc2-core-foundation = { version = "0.3", features = [
 global-hotkey = "0.7"
 arboard = "3"
 image = { version = "0.25", default-features = false, features = ["png"] }
+block2 = "0.6"
+objc2-av-foundation = { version = "0.3", features = [
+    "AVAssetWriter",
+    "AVAssetWriterInput",
+    "AVMediaFormat",
+    "AVVideoSettings",
+    "block2",
+    "objc2-core-media",
+    "objc2-core-video",
+] }
+objc2-core-media = { version = "0.3", features = [
+    "CMTime",
+    "CMSampleBuffer",
+    "CMFormatDescription",
+] }
+objc2-core-video = { version = "0.3", features = [
+    "CVBase",
+    "CVPixelBuffer",
+    "CVPixelBufferPool",
+    "CVBuffer",
+    "CVImageBuffer",
+    "CVReturn",
+    "CVPixelFormatDescription",
+] }
