@@ -291,6 +291,15 @@ define_class!(
             }
         }
 
+        #[unsafe(method(editorReverse:))]
+        fn editor_reverse(&self, _sender: &AnyObject) {
+            let mtm = MainThreadMarker::from(self);
+            let target: &AnyObject = unsafe { &*(self as *const Self as *const AnyObject) };
+            if let Some(ref editor) = *self.ivars().editor_window.borrow() {
+                editor.toggle_reverse(target, mtm);
+            }
+        }
+
         #[unsafe(method(editorAnnotationAdded:))]
         fn editor_annotation_added(&self, _sender: &AnyObject) {
             if let Some(ref editor) = *self.ivars().editor_window.borrow() {

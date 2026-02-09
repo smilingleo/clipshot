@@ -27,6 +27,7 @@ const COLOR_BUTTONS: &[(&str, &str, &str)] = &[
 ];
 
 const PLAYBACK_BUTTONS: &[(&str, &str, &str)] = &[
+    ("\u{25C0}", "editorReverse:",   "Reverse Play"),
     ("\u{25B6}", "editorPlayPause:", "Play / Pause (Space)"),
 ];
 

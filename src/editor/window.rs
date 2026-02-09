@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::Path;
 
 use objc2::rc::Retained;
@@ -21,6 +21,8 @@ pub struct EditorWindow {
     pub state: RefCell<EditorState>,
     pub decoder: VideoDecoder,
     pub timer: RefCell<Option<Retained<NSTimer>>>,
+    /// True when playing in reverse direction.
+    pub reversing: Cell<bool>,
 }
 
 impl EditorWindow {
@@ -82,6 +84,7 @@ impl EditorWindow {
             state: RefCell::new(state),
             decoder,
             timer: RefCell::new(None),
+            reversing: Cell::new(false),
         };
 
         // Pause at frame 0 to create the first annotation session
@@ -130,18 +133,36 @@ impl EditorWindow {
         self.view.display_frame(ns_image, visible);
     }
 
-    /// Toggle play/pause.
+    /// Toggle forward play/pause.
     pub fn toggle_playback(&self, timer_target: &AnyObject, mtm: MainThreadMarker) {
         let is_playing = self.state.borrow().is_playing;
-        if is_playing {
+        if is_playing && !self.reversing.get() {
+            // Playing forward — pause
             self.pause(mtm);
         } else {
-            self.play(timer_target);
+            // Paused or playing reverse — start forward
+            self.stop_timer();
+            self.reversing.set(false);
+            self.start_play(timer_target);
         }
     }
 
-    /// Start playback: create a timer that advances frames.
-    fn play(&self, timer_target: &AnyObject) {
+    /// Toggle reverse play/pause.
+    pub fn toggle_reverse(&self, timer_target: &AnyObject, mtm: MainThreadMarker) {
+        let is_playing = self.state.borrow().is_playing;
+        if is_playing && self.reversing.get() {
+            // Playing reverse — pause
+            self.pause(mtm);
+        } else {
+            // Paused or playing forward — start reverse
+            self.stop_timer();
+            self.reversing.set(true);
+            self.start_play(timer_target);
+        }
+    }
+
+    /// Start playback timer (direction determined by `self.reversing`).
+    fn start_play(&self, timer_target: &AnyObject) {
         self.view.commit_text_field();
         self.state.borrow_mut().play();
 
@@ -159,15 +180,21 @@ impl EditorWindow {
         };
         *self.timer.borrow_mut() = Some(timer);
 
-        eprintln!("Editor: playing");
+        let dir = if self.reversing.get() { "reverse" } else { "forward" };
+        eprintln!("Editor: playing {}", dir);
+    }
+
+    /// Stop the playback timer without creating a new annotation session.
+    fn stop_timer(&self) {
+        if let Some(timer) = self.timer.borrow_mut().take() {
+            timer.invalidate();
+        }
     }
 
     /// Pause playback: stop timer and create new annotation session.
     fn pause(&self, mtm: MainThreadMarker) {
-        // Stop timer
-        if let Some(timer) = self.timer.borrow_mut().take() {
-            timer.invalidate();
-        }
+        self.stop_timer();
+        self.reversing.set(false);
 
         let current_frame = self.state.borrow().current_frame;
         self.state.borrow_mut().pause_at(current_frame);
@@ -178,20 +205,28 @@ impl EditorWindow {
         eprintln!("Editor: paused at frame {}", current_frame);
     }
 
-    /// Advance one frame (called by timer).
+    /// Step one frame forward or backward (called by timer).
     pub fn advance_frame(&self, mtm: MainThreadMarker) {
         let mut state = self.state.borrow_mut();
         if !state.is_playing {
             return;
         }
 
-        state.current_frame += 1;
-        if state.current_frame >= state.total_frames {
-            // Reached end: pause at last frame
-            state.current_frame = state.total_frames - 1;
-            drop(state);
-            self.pause(mtm);
-            return;
+        if self.reversing.get() {
+            if state.current_frame == 0 {
+                drop(state);
+                self.pause(mtm);
+                return;
+            }
+            state.current_frame -= 1;
+        } else {
+            state.current_frame += 1;
+            if state.current_frame >= state.total_frames {
+                state.current_frame = state.total_frames - 1;
+                drop(state);
+                self.pause(mtm);
+                return;
+            }
         }
         drop(state);
 
