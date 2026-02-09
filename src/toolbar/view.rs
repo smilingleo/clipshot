@@ -10,31 +10,31 @@ const BUTTON_H: CGFloat = 24.0;
 const BUTTON_SPACING: CGFloat = 2.0;
 const TOOLBAR_PADDING: CGFloat = 4.0;
 
-const TOOL_BUTTONS: &[(&str, &str)] = &[
-    ("\u{2196}", "toolSelect:"),  // ↖ Select
-    ("\u{2192}", "toolArrow:"),   // → Arrow
-    ("\u{25A1}", "toolRect:"),    // □ Rectangle
-    ("\u{25CB}", "toolEllipse:"), // ○ Ellipse
-    ("\u{270E}", "toolPencil:"),  // ✎ Pencil
-    ("T", "toolText:"),           // Text
+const TOOL_BUTTONS: &[(&str, &str, &str)] = &[
+    ("\u{2196}", "toolSelect:",  "Select"),
+    ("\u{2192}", "toolArrow:",   "Arrow"),
+    ("\u{25A1}", "toolRect:",    "Rectangle"),
+    ("\u{25CB}", "toolEllipse:", "Ellipse"),
+    ("\u{270E}", "toolPencil:",  "Pencil"),
+    ("T",        "toolText:",    "Text"),
 ];
 
-const COLOR_BUTTONS: &[(&str, &str)] = &[
-    ("R", "colorRed:"),
-    ("B", "colorBlue:"),
-    ("G", "colorGreen:"),
-    ("Y", "colorYellow:"),
+const COLOR_BUTTONS: &[(&str, &str, &str)] = &[
+    ("R", "colorRed:",    "Red"),
+    ("B", "colorBlue:",   "Blue"),
+    ("G", "colorGreen:",  "Green"),
+    ("Y", "colorYellow:", "Yellow"),
 ];
 
-const PLAYBACK_BUTTONS: &[(&str, &str)] = &[
-    ("\u{25B6}", "editorPlayPause:"), // ▶ Play/Pause
+const PLAYBACK_BUTTONS: &[(&str, &str, &str)] = &[
+    ("\u{25B6}", "editorPlayPause:", "Play / Pause (Space)"),
 ];
 
-const ACTION_BUTTONS: &[(&str, &str)] = &[
-    ("\u{21A9}", "actionUndo:"),    // ↩ Undo
-    ("\u{2715}", "actionCancel:"),  // ✕ Cancel
-    ("S", "actionSave:"),           // Save
-    ("\u{2713}", "actionConfirm:"), // ✓ Confirm
+const ACTION_BUTTONS: &[(&str, &str, &str)] = &[
+    ("\u{21A9}", "actionUndo:",    "Undo (Cmd+Z)"),
+    ("\u{2715}", "actionCancel:",  "Cancel (Esc)"),
+    ("S",        "actionSave:",    "Save to File"),
+    ("\u{2713}", "actionConfirm:", "Confirm"),
 ];
 
 pub struct ToolbarViewIvars {}
@@ -77,32 +77,32 @@ impl ToolbarView {
 
         let mut x = TOOLBAR_PADDING;
 
-        for (label, sel_name) in TOOL_BUTTONS {
-            let btn = create_button(mtm, label, sel_name, x, TOOLBAR_PADDING);
+        for (label, sel_name, tooltip) in TOOL_BUTTONS {
+            let btn = create_button(mtm, label, sel_name, tooltip, x, TOOLBAR_PADDING);
             view.addSubview(&btn);
             x += BUTTON_W + BUTTON_SPACING;
         }
 
         x += BUTTON_SPACING * 2.0;
 
-        for (label, sel_name) in COLOR_BUTTONS {
-            let btn = create_button(mtm, label, sel_name, x, TOOLBAR_PADDING);
+        for (label, sel_name, tooltip) in COLOR_BUTTONS {
+            let btn = create_button(mtm, label, sel_name, tooltip, x, TOOLBAR_PADDING);
             view.addSubview(&btn);
             x += BUTTON_W + BUTTON_SPACING;
         }
 
         x += BUTTON_SPACING * 2.0;
 
-        for (label, sel_name) in PLAYBACK_BUTTONS {
-            let btn = create_button(mtm, label, sel_name, x, TOOLBAR_PADDING);
+        for (label, sel_name, tooltip) in PLAYBACK_BUTTONS {
+            let btn = create_button(mtm, label, sel_name, tooltip, x, TOOLBAR_PADDING);
             view.addSubview(&btn);
             x += BUTTON_W + BUTTON_SPACING;
         }
 
         x += BUTTON_SPACING * 2.0;
 
-        for (label, sel_name) in ACTION_BUTTONS {
-            let btn = create_button(mtm, label, sel_name, x, TOOLBAR_PADDING);
+        for (label, sel_name, tooltip) in ACTION_BUTTONS {
+            let btn = create_button(mtm, label, sel_name, tooltip, x, TOOLBAR_PADDING);
             view.addSubview(&btn);
             x += BUTTON_W + BUTTON_SPACING;
         }
@@ -115,6 +115,7 @@ fn create_button(
     mtm: MainThreadMarker,
     label: &str,
     sel_name: &str,
+    tooltip: &str,
     x: CGFloat,
     y: CGFloat,
 ) -> Retained<NSButton> {
@@ -125,6 +126,7 @@ fn create_button(
     unsafe {
         button.setAction(Some(Sel::register(&sel_cstr)));
         button.setTarget(None);
+        button.setToolTip(Some(&NSString::from_str(tooltip)));
     }
     button.setFont(Some(&NSFont::systemFontOfSize(12.0)));
     #[allow(deprecated)]

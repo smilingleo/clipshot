@@ -301,6 +301,11 @@ define_class!(
                 editor.advance_frame(mtm);
             }
         }
+
+        #[unsafe(method(editorWindowClosed:))]
+        fn editor_window_closed(&self, _notification: &NSNotification) {
+            self.close_editor_and_save_raw();
+        }
     }
 );
 
@@ -485,6 +490,19 @@ impl AppDelegate {
     fn open_editor(&self, video_path: &PathBuf, mtm: MainThreadMarker) {
         match EditorWindow::open(video_path, mtm) {
             Ok(editor) => {
+                // Observe window close to exit editing mode
+                let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+                let observer: &AnyObject =
+                    unsafe { &*(self as *const Self as *const AnyObject) };
+                unsafe {
+                    center.addObserver_selector_name_object(
+                        observer,
+                        sel!(editorWindowClosed:),
+                        Some(objc2_app_kit::NSWindowWillCloseNotification),
+                        Some(&*editor.window),
+                    );
+                }
+
                 // Show the toolbar near the editor window
                 self.show_editor_toolbar(mtm);
                 *self.ivars().editor_window.borrow_mut() = Some(editor);
@@ -555,6 +573,17 @@ impl AppDelegate {
 
         // Close editor
         if let Some(editor) = self.ivars().editor_window.borrow_mut().take() {
+            // Remove notification observer
+            let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+            let observer: &AnyObject =
+                unsafe { &*(self as *const Self as *const AnyObject) };
+            unsafe {
+                center.removeObserver_name_object(
+                    observer,
+                    Some(objc2_app_kit::NSWindowWillCloseNotification),
+                    Some(&*editor.window),
+                );
+            }
             editor.close();
         }
         if let Some(toolbar) = self.ivars().toolbar.borrow().as_ref() {
@@ -577,6 +606,18 @@ impl AppDelegate {
 
         let editor = self.ivars().editor_window.borrow_mut().take();
         if let Some(editor) = editor {
+            // Remove notification observer
+            let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+            let observer: &AnyObject =
+                unsafe { &*(self as *const Self as *const AnyObject) };
+            unsafe {
+                center.removeObserver_name_object(
+                    observer,
+                    Some(objc2_app_kit::NSWindowWillCloseNotification),
+                    Some(&*editor.window),
+                );
+            }
+
             let video_path = editor.state.borrow().video_path.clone();
             editor.close();
 

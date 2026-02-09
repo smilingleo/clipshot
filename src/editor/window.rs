@@ -32,12 +32,21 @@ impl EditorWindow {
         let dec_height = decoder.height();
         let total_frames = decoder.total_frames();
         let fps = decoder.fps();
-        let width = dec_width as CGFloat;
-        let height = dec_height as CGFloat;
 
         if total_frames == 0 {
             return Err("Video has no frames".to_string());
         }
+
+        // Scale up if video height is less than 800px
+        const MIN_HEIGHT: CGFloat = 800.0;
+        let native_w = dec_width as CGFloat;
+        let native_h = dec_height as CGFloat;
+        let (window_w, window_h) = if native_h < MIN_HEIGHT {
+            let scale = MIN_HEIGHT / native_h;
+            ((native_w * scale).round(), MIN_HEIGHT)
+        } else {
+            (native_w, native_h)
+        };
 
         let state = EditorState::new(
             video_path.to_path_buf(),
@@ -46,7 +55,7 @@ impl EditorWindow {
         );
 
         // Create the window
-        let content_rect = NSRect::new(CGPoint::ZERO, CGSize::new(width, height));
+        let content_rect = NSRect::new(CGPoint::ZERO, CGSize::new(window_w, window_h));
         let style = NSWindowStyleMask::Titled
             | NSWindowStyleMask::Closable
             | NSWindowStyleMask::Miniaturizable;
@@ -63,7 +72,7 @@ impl EditorWindow {
         window.center();
 
         // Create the editor view
-        let view_frame = NSRect::new(CGPoint::ZERO, CGSize::new(width, height));
+        let view_frame = NSRect::new(CGPoint::ZERO, CGSize::new(window_w, window_h));
         let view = EditorView::new(mtm, view_frame);
         window.setContentView(Some(&view));
 
