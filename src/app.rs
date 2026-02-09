@@ -75,7 +75,7 @@ define_class!(
                 );
             }
 
-            eprintln!("Screenshot app started. Ctrl+Shift+A=capture, Ctrl+Shift+R=record.");
+            eprintln!("Screenshot app started. Ctrl+Cmd+A=capture, Ctrl+Cmd+V=record.");
         }
     }
 

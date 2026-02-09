@@ -11,26 +11,26 @@ impl HotkeyManager {
     pub fn new() -> Self {
         let manager = GlobalHotKeyManager::new().expect("failed to create hotkey manager");
 
-        // Register Ctrl+Shift+A for screenshot
+        // Register Ctrl+Cmd+A for screenshot
         let capture_hotkey = HotKey::new(
-            Some(Modifiers::CONTROL | Modifiers::SHIFT),
+            Some(Modifiers::CONTROL | Modifiers::META),
             Code::KeyA,
         );
         manager
             .register(capture_hotkey)
             .expect("failed to register capture hotkey");
 
-        // Register Ctrl+Shift+R for screen recording
+        // Register Ctrl+Cmd+V for screen recording
         let record_hotkey = HotKey::new(
-            Some(Modifiers::CONTROL | Modifiers::SHIFT),
-            Code::KeyR,
+            Some(Modifiers::CONTROL | Modifiers::META),
+            Code::KeyV,
         );
         manager
             .register(record_hotkey)
             .expect("failed to register record hotkey");
 
         eprintln!(
-            "Global hotkeys registered: Ctrl+Shift+A (id={}), Ctrl+Shift+R (id={})",
+            "Global hotkeys registered: Ctrl+Cmd+A (id={}), Ctrl+Cmd+V (id={})",
             capture_hotkey.id(),
             record_hotkey.id()
         );
