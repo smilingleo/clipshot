@@ -213,6 +213,12 @@ define_class!(
 
         #[unsafe(method(actionSave:))]
         fn action_save(&self, _sender: &AnyObject) {
+            // If editor is open, export with annotations and save
+            if self.ivars().editor_window.borrow().is_some() {
+                self.export_editor();
+                return;
+            }
+
             let mtm = MainThreadMarker::from(self);
             let image = self.get_final_image();
             // Dismiss overlay first so the NSSavePanel isn't hidden behind it.
