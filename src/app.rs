@@ -302,9 +302,10 @@ define_class!(
 
         #[unsafe(method(editorAnnotationAdded:))]
         fn editor_annotation_added(&self, _sender: &AnyObject) {
+            let mtm = MainThreadMarker::from(self);
             if let Some(ref editor) = *self.ivars().editor_window.borrow() {
                 if let Some(ann) = editor.view.take_pending_annotation() {
-                    editor.add_annotation(ann);
+                    editor.add_annotation(ann, mtm);
                 }
             }
         }
@@ -317,9 +318,84 @@ define_class!(
             }
         }
 
+        #[unsafe(method(editorSliderChanged:))]
+        fn editor_slider_changed(&self, sender: &AnyObject) {
+            let mtm = MainThreadMarker::from(self);
+            if let Some(ref editor) = *self.ivars().editor_window.borrow() {
+                let value: f64 = unsafe { msg_send![sender, doubleValue] };
+                editor.seek_to_frame(value as usize, mtm);
+            }
+        }
+
         #[unsafe(method(editorWindowClosed:))]
         fn editor_window_closed(&self, _notification: &NSNotification) {
             self.close_editor_and_save_raw();
+        }
+
+        #[unsafe(method(editorConfirmAnnotation:))]
+        fn editor_confirm_annotation(&self, _sender: &AnyObject) {
+            let mtm = MainThreadMarker::from(self);
+            if let Some(ref editor) = *self.ivars().editor_window.borrow() {
+                editor.confirm_active_annotation(mtm);
+            }
+        }
+
+        #[unsafe(method(editorSelectionClick:))]
+        fn editor_selection_click(&self, _sender: &AnyObject) {
+            let mtm = MainThreadMarker::from(self);
+            if let Some(ref editor) = *self.ivars().editor_window.borrow() {
+                let point = editor.view.take_selection_click_point();
+                if let Some(point) = point {
+                    let state = editor.state.borrow();
+                    let frame = state.current_frame;
+                    let hit = state.hit_test_annotation(point, frame);
+                    drop(state);
+
+                    if let Some(idx) = hit {
+                        editor.select_annotation_at_index(idx, mtm);
+                    } else {
+                        editor.deselect_and_hide_mini_bar();
+                        editor.display_current_frame(mtm);
+                    }
+                }
+            }
+        }
+
+        #[unsafe(method(editorDeleteAnnotation:))]
+        fn editor_delete_annotation(&self, _sender: &AnyObject) {
+            let mtm = MainThreadMarker::from(self);
+            if let Some(ref editor) = *self.ivars().editor_window.borrow() {
+                editor.delete_active_annotation(mtm);
+            }
+        }
+
+        #[unsafe(method(editorMiniBarChanged:))]
+        fn editor_mini_bar_changed(&self, _sender: &AnyObject) {
+            let mtm = MainThreadMarker::from(self);
+            if let Some(ref editor) = *self.ivars().editor_window.borrow() {
+                if let Some(seek_frame) = editor.minibar_view.take_pending_seek_frame() {
+                    editor.seek_to_frame(seek_frame, mtm);
+                }
+            }
+        }
+
+        #[unsafe(method(editorMiniBarDragEnded:))]
+        fn editor_mini_bar_drag_ended(&self, _sender: &AnyObject) {
+            let mtm = MainThreadMarker::from(self);
+            if let Some(ref editor) = *self.ivars().editor_window.borrow() {
+                let active_idx = editor.state.borrow().active_annotation;
+                if let Some(idx) = active_idx {
+                    let start = editor.minibar_view.start_frame();
+                    let end = editor.minibar_view.end_frame();
+                    let mut state = editor.state.borrow_mut();
+                    state.set_annotation_start(idx, start);
+                    if let Some(end) = end {
+                        state.set_annotation_end(idx, end);
+                    }
+                    drop(state);
+                    editor.display_current_frame(mtm);
+                }
+            }
         }
     }
 );
@@ -371,6 +447,10 @@ impl AppDelegate {
 
         // Set recording mode and show overlay for region selection
         self.ivars().recording_mode.set(true);
+        // Disable all toolbar buttons except Confirm during region selection
+        if let Some(toolbar) = self.ivars().toolbar.borrow().as_ref() {
+            toolbar.set_non_confirm_buttons_enabled(false);
+        }
         eprintln!("Record hotkey pressed — select region then confirm");
         self.do_capture();
     }
@@ -556,7 +636,7 @@ impl AppDelegate {
 
         let state = editor.sessions();
         let video_path = state.video_path.clone();
-        let sessions = &state.sessions;
+        let annotations = &state.annotations;
 
         // Create temp file for export
         let export_path = std::env::temp_dir().join(format!(
@@ -568,11 +648,11 @@ impl AppDelegate {
         ));
 
         // Check if there are any annotations at all
-        let has_annotations = sessions.iter().any(|s| !s.annotations.is_empty());
+        let has_annotations = state.has_any_annotations();
 
         if has_annotations {
             if let Err(e) =
-                crate::editor::export::export_with_annotations(&editor.decoder, sessions, &export_path)
+                crate::editor::export::export_with_annotations(&editor.decoder, annotations, &export_path)
             {
                 eprintln!("Export failed: {}", e);
                 drop(state);
@@ -674,10 +754,12 @@ impl AppDelegate {
 
     fn set_active_tool(&self, tool: ActiveTool) {
         if let Some(ref editor) = *self.ivars().editor_window.borrow() {
+            editor.view.commit_text_field();
             editor.view.ivars().active_tool.set(tool);
             return;
         }
         if let Some(overlay) = self.ivars().overlay.borrow().as_ref() {
+            overlay.view.commit_text_field();
             overlay.view.ivars().active_tool.set(tool);
         }
     }
@@ -697,6 +779,8 @@ impl AppDelegate {
             overlay.hide();
         }
         if let Some(toolbar) = self.ivars().toolbar.borrow().as_ref() {
+            // Re-enable all buttons so toolbar is in a clean state for next use
+            toolbar.set_non_confirm_buttons_enabled(true);
             toolbar.hide();
         }
         *self.ivars().captured_image.borrow_mut() = None;

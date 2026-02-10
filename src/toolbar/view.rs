@@ -1,6 +1,8 @@
+use std::cell::RefCell;
+
 use objc2::rc::Retained;
 use objc2::runtime::Sel;
-use objc2::{define_class, msg_send, MainThreadOnly};
+use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{NSButton, NSEvent, NSFont, NSView};
 use objc2_core_foundation::{CGFloat, CGPoint, CGSize};
 use objc2_foundation::{MainThreadMarker, NSRect, NSString};
@@ -38,7 +40,10 @@ const ACTION_BUTTONS: &[(&str, &str, &str)] = &[
     ("\u{2713}", "actionConfirm:", "Confirm"),
 ];
 
-pub struct ToolbarViewIvars {}
+pub struct ToolbarViewIvars {
+    /// All buttons except Confirm, for enabling/disabling.
+    non_confirm_buttons: RefCell<Vec<Retained<NSButton>>>,
+}
 
 define_class!(
     #[unsafe(super(NSView))]
@@ -73,14 +78,18 @@ impl ToolbarView {
         let height = TOOLBAR_PADDING * 2.0 + BUTTON_H;
 
         let frame = NSRect::new(CGPoint::ZERO, CGSize::new(width, height));
-        let this = mtm.alloc().set_ivars(ToolbarViewIvars {});
+        let this = mtm.alloc().set_ivars(ToolbarViewIvars {
+            non_confirm_buttons: RefCell::new(Vec::new()),
+        });
         let view: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
 
         let mut x = TOOLBAR_PADDING;
+        let mut non_confirm = Vec::new();
 
         for (label, sel_name, tooltip) in TOOL_BUTTONS {
             let btn = create_button(mtm, label, sel_name, tooltip, x, TOOLBAR_PADDING);
             view.addSubview(&btn);
+            non_confirm.push(btn);
             x += BUTTON_W + BUTTON_SPACING;
         }
 
@@ -89,6 +98,7 @@ impl ToolbarView {
         for (label, sel_name, tooltip) in COLOR_BUTTONS {
             let btn = create_button(mtm, label, sel_name, tooltip, x, TOOLBAR_PADDING);
             view.addSubview(&btn);
+            non_confirm.push(btn);
             x += BUTTON_W + BUTTON_SPACING;
         }
 
@@ -97,18 +107,34 @@ impl ToolbarView {
         for (label, sel_name, tooltip) in PLAYBACK_BUTTONS {
             let btn = create_button(mtm, label, sel_name, tooltip, x, TOOLBAR_PADDING);
             view.addSubview(&btn);
+            non_confirm.push(btn);
             x += BUTTON_W + BUTTON_SPACING;
         }
 
         x += BUTTON_SPACING * 2.0;
 
-        for (label, sel_name, tooltip) in ACTION_BUTTONS {
+        for (i, (label, sel_name, tooltip)) in ACTION_BUTTONS.iter().enumerate() {
             let btn = create_button(mtm, label, sel_name, tooltip, x, TOOLBAR_PADDING);
             view.addSubview(&btn);
+            // Last button in ACTION_BUTTONS is Confirm — don't add it to non_confirm
+            if i < ACTION_BUTTONS.len() - 1 {
+                non_confirm.push(btn);
+            }
             x += BUTTON_W + BUTTON_SPACING;
         }
 
+        *view.ivars().non_confirm_buttons.borrow_mut() = non_confirm;
+
         view
+    }
+
+    /// Enable or disable all buttons except the Confirm button.
+    pub fn set_non_confirm_buttons_enabled(&self, enabled: bool) {
+        let buttons = self.ivars().non_confirm_buttons.borrow();
+        for btn in buttons.iter() {
+            let btn: &NSButton = btn;
+            btn.setEnabled(enabled);
+        }
     }
 }
 

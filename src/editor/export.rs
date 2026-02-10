@@ -7,13 +7,13 @@ use objc2_core_graphics::{
 };
 
 use super::decoder::VideoDecoder;
-use super::model::AnnotationSession;
+use super::model::TimedAnnotation;
 use crate::encoder::VideoEncoder;
 
 /// Export the video with timed annotations composited onto frames.
 pub fn export_with_annotations(
     decoder: &VideoDecoder,
-    sessions: &[AnnotationSession],
+    annotations: &[TimedAnnotation],
     output_path: &Path,
 ) -> Result<(), String> {
     let width = decoder.width();
@@ -34,16 +34,13 @@ pub fn export_with_annotations(
         };
 
         // Collect annotations visible at this frame
-        let visible_annotations: Vec<_> = sessions
+        let visible_annotations: Vec<_> = annotations
             .iter()
-            .filter(|s| {
-                frame_idx >= s.start_frame
-                    && match s.end_frame {
-                        Some(end) => frame_idx < end,
-                        None => true,
-                    }
+            .filter(|ta| {
+                frame_idx >= ta.start_frame
+                    && ta.end_frame.map_or(true, |end| frame_idx < end)
             })
-            .flat_map(|s| s.annotations.iter())
+            .map(|ta| &ta.annotation)
             .collect();
 
         if visible_annotations.is_empty() {

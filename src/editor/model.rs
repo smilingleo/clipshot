@@ -1,14 +1,15 @@
 use std::path::PathBuf;
 
+use objc2_core_foundation::CGPoint;
+
 use crate::annotation::model::Annotation;
 
-/// A group of annotations drawn during a single pause, scoped to a frame range.
-pub struct AnnotationSession {
-    pub annotations: Vec<Annotation>,
-    /// Frame index when this pause began (annotations appear from this frame).
+/// A single annotation with its own lifespan (frame range).
+#[derive(Clone)]
+pub struct TimedAnnotation {
+    pub annotation: Annotation,
     pub start_frame: usize,
-    /// Frame index when the next pause began (annotations disappear at this frame).
-    /// None means annotations persist until the end of the video.
+    /// None means the annotation persists until the end of the video.
     pub end_frame: Option<usize>,
 }
 
@@ -19,9 +20,9 @@ pub struct EditorState {
     pub fps: f64,
     pub current_frame: usize,
     pub is_playing: bool,
-    pub sessions: Vec<AnnotationSession>,
-    /// Index into sessions for the session being annotated (while paused).
-    pub active_session: Option<usize>,
+    pub annotations: Vec<TimedAnnotation>,
+    /// Index into annotations for the annotation currently being edited.
+    pub active_annotation: Option<usize>,
 }
 
 impl EditorState {
@@ -32,31 +33,9 @@ impl EditorState {
             fps,
             current_frame: 0,
             is_playing: false,
-            sessions: Vec::new(),
-            active_session: None,
-        }
-    }
-
-    /// Called when the user pauses playback. Creates a new annotation session
-    /// and closes the previous one's frame range.
-    pub fn pause_at(&mut self, frame: usize) {
-        // Close the previous active session's end_frame
-        if let Some(prev_idx) = self.active_session {
-            if let Some(prev) = self.sessions.get_mut(prev_idx) {
-                if prev.end_frame.is_none() {
-                    prev.end_frame = Some(frame);
-                }
-            }
-        }
-
-        let new_session = AnnotationSession {
             annotations: Vec::new(),
-            start_frame: frame,
-            end_frame: None,
-        };
-        self.sessions.push(new_session);
-        self.active_session = Some(self.sessions.len() - 1);
-        self.is_playing = false;
+            active_annotation: None,
+        }
     }
 
     /// Called when the user resumes playback.
@@ -64,40 +43,119 @@ impl EditorState {
         self.is_playing = true;
     }
 
-    /// Add an annotation to the current active session.
-    pub fn add_annotation(&mut self, annotation: Annotation) {
-        if let Some(idx) = self.active_session {
-            if let Some(session) = self.sessions.get_mut(idx) {
-                session.annotations.push(annotation);
-            }
-        }
+    /// Add an annotation at the given frame. Sets it as active and returns its index.
+    pub fn add_annotation(&mut self, annotation: Annotation, frame: usize) -> usize {
+        let timed = TimedAnnotation {
+            annotation,
+            start_frame: frame,
+            end_frame: None,
+        };
+        self.annotations.push(timed);
+        let idx = self.annotations.len() - 1;
+        self.active_annotation = Some(idx);
+        idx
     }
 
-    /// Remove the last annotation from the active session.
+    /// Remove the active annotation, or pop the last annotation if none is active.
     pub fn undo_annotation(&mut self) {
-        if let Some(idx) = self.active_session {
-            if let Some(session) = self.sessions.get_mut(idx) {
-                session.annotations.pop();
+        if let Some(idx) = self.active_annotation.take() {
+            if idx < self.annotations.len() {
+                self.annotations.remove(idx);
+            }
+        } else if !self.annotations.is_empty() {
+            self.annotations.pop();
+        }
+    }
+
+    /// Delete a specific annotation by index. Clears active_annotation if it matches.
+    pub fn delete_annotation(&mut self, idx: usize) {
+        if idx >= self.annotations.len() {
+            return;
+        }
+        self.annotations.remove(idx);
+        // Adjust or clear active_annotation
+        match self.active_annotation {
+            Some(active) if active == idx => {
+                self.active_annotation = None;
+            }
+            Some(active) if active > idx => {
+                self.active_annotation = Some(active - 1);
+            }
+            _ => {}
+        }
+    }
+
+    /// Collect all annotations visible at a given frame index, with their indices.
+    pub fn annotations_at_frame(&self, frame: usize) -> Vec<(usize, &Annotation)> {
+        self.annotations
+            .iter()
+            .enumerate()
+            .filter(|(_, ta)| {
+                frame >= ta.start_frame
+                    && ta.end_frame.map_or(true, |end| frame < end)
+            })
+            .map(|(i, ta)| (i, &ta.annotation))
+            .collect()
+    }
+
+    /// Confirm the active annotation's end frame. Clears active_annotation.
+    pub fn confirm_active(&mut self, frame: usize) {
+        if let Some(idx) = self.active_annotation.take() {
+            if let Some(ta) = self.annotations.get_mut(idx) {
+                ta.end_frame = Some(frame.max(ta.start_frame + 1));
             }
         }
     }
 
-    /// Collect all annotations visible at a given frame index.
-    pub fn annotations_at_frame(&self, frame: usize) -> Vec<&Annotation> {
-        let mut result = Vec::new();
-        for session in &self.sessions {
-            if frame >= session.start_frame {
-                let in_range = match session.end_frame {
-                    Some(end) => frame < end,
-                    None => true,
-                };
-                if in_range {
-                    for ann in &session.annotations {
-                        result.push(ann);
-                    }
-                }
+    /// Set an annotation's start frame with validation.
+    pub fn set_annotation_start(&mut self, idx: usize, frame: usize) {
+        if let Some(ta) = self.annotations.get_mut(idx) {
+            let max_start = ta.end_frame.map_or(self.total_frames.saturating_sub(1), |end| end.saturating_sub(1));
+            ta.start_frame = frame.min(max_start);
+        }
+    }
+
+    /// Set an annotation's end frame with validation.
+    pub fn set_annotation_end(&mut self, idx: usize, frame: usize) {
+        if let Some(ta) = self.annotations.get_mut(idx) {
+            let clamped = frame.max(ta.start_frame + 1).min(self.total_frames);
+            ta.end_frame = Some(clamped);
+        }
+    }
+
+    /// Select an annotation by index for editing.
+    pub fn select_annotation(&mut self, idx: usize) {
+        if idx < self.annotations.len() {
+            self.active_annotation = Some(idx);
+        }
+    }
+
+    /// Deselect the active annotation.
+    pub fn deselect_annotation(&mut self) {
+        self.active_annotation = None;
+    }
+
+    /// Hit-test annotations at a point for the given frame. Returns the topmost match.
+    pub fn hit_test_annotation(&self, point: CGPoint, frame: usize) -> Option<usize> {
+        // Iterate in reverse so topmost (last drawn) is found first
+        let visible = self.annotations_at_frame(frame);
+        for (idx, ann) in visible.into_iter().rev() {
+            if ann.hit_test(point) {
+                return Some(idx);
             }
         }
-        result
+        None
+    }
+
+    /// Returns true if there are any annotations.
+    pub fn has_any_annotations(&self) -> bool {
+        !self.annotations.is_empty()
+    }
+
+    /// Get the active annotation's range, if any.
+    pub fn active_annotation_range(&self) -> Option<(usize, Option<usize>)> {
+        self.active_annotation.and_then(|idx| {
+            self.annotations.get(idx).map(|ta| (ta.start_frame, ta.end_frame))
+        })
     }
 }

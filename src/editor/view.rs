@@ -7,6 +7,7 @@ use objc2_app_kit::{
     NSTrackingAreaOptions, NSView,
 };
 use objc2_core_foundation::{CGFloat, CGPoint, CGSize};
+use objc2_core_graphics::CGContext;
 use objc2_foundation::{MainThreadMarker, NSRect, NSString};
 
 use crate::annotation::model::{Annotation, update_annotation};
@@ -17,13 +18,17 @@ pub struct EditorViewIvars {
     pub active_tool: Cell<ActiveTool>,
     pub annotation_color: Cell<(CGFloat, CGFloat, CGFloat)>,
     pub current_annotation: RefCell<Option<Annotation>>,
-    /// All annotations to draw on the current frame (from active sessions).
-    pub annotations_to_draw: RefCell<Vec<Annotation>>,
+    /// Annotations to draw on the current frame, with their indices in EditorState.
+    pub annotations_to_draw: RefCell<Vec<(usize, Annotation)>>,
     /// Completed annotation waiting to be picked up by the editor window.
     pub pending_annotation: RefCell<Option<Annotation>>,
     pub tracking_area: RefCell<Option<Retained<NSTrackingArea>>>,
     pub text_field: RefCell<Option<Retained<NSTextField>>>,
     pub text_position: Cell<CGPoint>,
+    /// Click point stored when Select tool is used, for the delegate to read.
+    pub selection_click_point: Cell<Option<CGPoint>>,
+    /// Index of the currently selected/active annotation (for visual highlight).
+    pub active_annotation_index: Cell<Option<usize>>,
 }
 
 define_class!(
@@ -68,8 +73,14 @@ define_class!(
             }
 
             // Draw all annotations visible at this frame
-            for ann in self.ivars().annotations_to_draw.borrow().iter() {
+            let active_idx = self.ivars().active_annotation_index.get();
+            for (idx, ann) in self.ivars().annotations_to_draw.borrow().iter() {
                 crate::annotation::renderer::draw_annotation(&cg, ann);
+
+                // Draw highlight around the active/selected annotation
+                if active_idx == Some(*idx) {
+                    draw_selection_highlight(&cg, ann);
+                }
             }
 
             // Draw the in-progress annotation
@@ -80,10 +91,15 @@ define_class!(
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
+            // Commit any open text field (removes it if empty)
+            self.commit_text_field();
+
             let point = self.convert_event_point(event);
             let active_tool = self.ivars().active_tool.get();
 
             if active_tool == ActiveTool::Select {
+                self.ivars().selection_click_point.set(Some(point));
+                self.notify_delegate_selection_click();
                 return;
             }
 
@@ -121,6 +137,14 @@ define_class!(
             if key_code == 53 {
                 self.notify_delegate_cancel();
                 return;
+            }
+
+            // Delete (backspace=51, forward delete=117) -> delete selected annotation
+            if key_code == 51 || key_code == 117 {
+                if self.ivars().active_annotation_index.get().is_some() {
+                    self.notify_delegate_delete_annotation();
+                    return;
+                }
             }
 
             // Cmd+Z = undo
@@ -168,13 +192,15 @@ impl EditorView {
             tracking_area: RefCell::new(None),
             text_field: RefCell::new(None),
             text_position: Cell::new(CGPoint::ZERO),
+            selection_click_point: Cell::new(None),
+            active_annotation_index: Cell::new(None),
         });
         let view: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         view
     }
 
-    /// Set the current frame image and the annotations visible at this frame.
-    pub fn display_frame(&self, image: Retained<NSImage>, annotations: Vec<Annotation>) {
+    /// Set the current frame image and the indexed annotations visible at this frame.
+    pub fn display_frame(&self, image: Retained<NSImage>, annotations: Vec<(usize, Annotation)>) {
         *self.ivars().current_image.borrow_mut() = Some(image);
         *self.ivars().annotations_to_draw.borrow_mut() = annotations;
         self.setNeedsDisplay(true);
@@ -184,6 +210,18 @@ impl EditorView {
     /// receiving editorAnnotationAdded: notification.
     pub fn take_pending_annotation(&self) -> Option<Annotation> {
         self.ivars().pending_annotation.borrow_mut().take()
+    }
+
+    /// Take the selection click point. Called by the app delegate after
+    /// receiving editorSelectionClick: notification.
+    pub fn take_selection_click_point(&self) -> Option<CGPoint> {
+        self.ivars().selection_click_point.take()
+    }
+
+    /// Set the active annotation index for visual highlight.
+    pub fn set_active_annotation_index(&self, idx: Option<usize>) {
+        self.ivars().active_annotation_index.set(idx);
+        self.setNeedsDisplay(true);
     }
 
     fn convert_event_point(&self, event: &NSEvent) -> CGPoint {
@@ -232,8 +270,8 @@ impl EditorView {
     fn finish_annotation(&self, ann: Annotation) {
         // Store in pending slot for the app delegate to pick up
         *self.ivars().pending_annotation.borrow_mut() = Some(ann.clone());
-        // Also add to annotations_to_draw for immediate visual feedback
-        self.ivars().annotations_to_draw.borrow_mut().push(ann);
+        // Also add to annotations_to_draw for immediate visual feedback (index 0 is placeholder)
+        self.ivars().annotations_to_draw.borrow_mut().push((usize::MAX, ann));
         self.setNeedsDisplay(true);
         // Notify app delegate
         self.notify_delegate_annotation();
@@ -314,4 +352,40 @@ impl EditorView {
             let _: () = unsafe { msg_send![&*delegate, editorAnnotationAdded: self] };
         }
     }
+
+    fn notify_delegate_selection_click(&self) {
+        let mtm = MainThreadMarker::from(self);
+        let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+        if let Some(delegate) = app.delegate() {
+            let _: () = unsafe { msg_send![&*delegate, editorSelectionClick: self] };
+        }
+    }
+
+    fn notify_delegate_delete_annotation(&self) {
+        let mtm = MainThreadMarker::from(self);
+        let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+        if let Some(delegate) = app.delegate() {
+            let _: () = unsafe { msg_send![&*delegate, editorDeleteAnnotation: self] };
+        }
+    }
+}
+
+/// Draw a dashed highlight border around a selected annotation.
+fn draw_selection_highlight(ctx: &CGContext, ann: &Annotation) {
+    let rect = ann.bounding_rect();
+    // Inflate slightly for visual clarity
+    let highlight = objc2_core_foundation::CGRect::new(
+        CGPoint::new(rect.origin.x - 2.0, rect.origin.y - 2.0),
+        objc2_core_foundation::CGSize::new(rect.size.width + 4.0, rect.size.height + 4.0),
+    );
+
+    CGContext::save_g_state(Some(ctx));
+    CGContext::set_rgb_stroke_color(Some(ctx), 0.2, 0.5, 1.0, 0.8);
+    CGContext::set_line_width(Some(ctx), 1.5);
+    let dash_lengths: [CGFloat; 2] = [4.0, 3.0];
+    unsafe {
+        CGContext::set_line_dash(Some(ctx), 0.0, dash_lengths.as_ptr(), dash_lengths.len());
+    }
+    CGContext::stroke_rect(Some(ctx), highlight);
+    CGContext::restore_g_state(Some(ctx));
 }

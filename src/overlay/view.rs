@@ -55,6 +55,8 @@ pub struct OverlayViewIvars {
     pub text_field: RefCell<Option<Retained<NSTextField>>>,
     /// Position where the text tool was clicked
     pub text_position: Cell<CGPoint>,
+    /// Index of the currently selected annotation (for highlight + delete).
+    pub active_annotation_index: Cell<Option<usize>>,
 }
 
 define_class!(
@@ -129,8 +131,12 @@ define_class!(
                 // Draw annotations within the selection area
                 CGContext::save_g_state(Some(&cg));
                 CGContext::clip_to_rect(Some(&cg), norm);
-                for ann in self.ivars().annotations.borrow().iter() {
+                let active_idx = self.ivars().active_annotation_index.get();
+                for (i, ann) in self.ivars().annotations.borrow().iter().enumerate() {
                     crate::annotation::renderer::draw_annotation(&cg, ann);
+                    if active_idx == Some(i) {
+                        draw_annotation_highlight(&cg, ann);
+                    }
                 }
                 if let Some(ref ann) = *self.ivars().current_annotation.borrow() {
                     crate::annotation::renderer::draw_annotation(&cg, ann);
@@ -162,9 +168,29 @@ define_class!(
         fn mouse_down(&self, event: &NSEvent) {
             let point = self.convert_event_point(event);
             self.ivars().drag_start.set(point);
+            self.commit_text_field();
 
             let active_tool = self.ivars().active_tool.get();
 
+            // Select tool with existing selection: annotation select/deselect only
+            if active_tool == ActiveTool::Select {
+                if self.ivars().selection.get().is_some() {
+                    let annotations = self.ivars().annotations.borrow();
+                    let mut hit_idx = None;
+                    for (i, ann) in annotations.iter().enumerate().rev() {
+                        if ann.hit_test(point) {
+                            hit_idx = Some(i);
+                            break;
+                        }
+                    }
+                    drop(annotations);
+                    self.ivars().active_annotation_index.set(hit_idx);
+                    self.setNeedsDisplay(true);
+                    return;
+                }
+            }
+
+            // Annotation tools: draw inside the selection
             if active_tool != ActiveTool::Select {
                 if let Some(sel_rect) = self.ivars().selection.get() {
                     let norm = normalize_rect(sel_rect);
@@ -266,7 +292,23 @@ define_class!(
             // Escape = 53
             if key_code == 53 {
                 self.dismiss();
+                return;
             }
+
+            // Delete (backspace=51, forward delete=117) -> delete selected annotation
+            if key_code == 51 || key_code == 117 {
+                if let Some(idx) = self.ivars().active_annotation_index.get() {
+                    let mut annotations = self.ivars().annotations.borrow_mut();
+                    if idx < annotations.len() {
+                        annotations.remove(idx);
+                    }
+                    drop(annotations);
+                    self.ivars().active_annotation_index.set(None);
+                    self.setNeedsDisplay(true);
+                    return;
+                }
+            }
+
             // Cmd+Z = undo (keyCode 6 = Z)
             let flags = event.modifierFlags();
             if key_code == 6
@@ -323,6 +365,7 @@ impl OverlayView {
             tracking_area: RefCell::new(None),
             text_field: RefCell::new(None),
             text_position: Cell::new(CGPoint::ZERO),
+            active_annotation_index: Cell::new(None),
         });
         let view: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         view
@@ -340,6 +383,7 @@ impl OverlayView {
         self.ivars().active_tool.set(ActiveTool::Select);
         self.ivars().annotations.borrow_mut().clear();
         *self.ivars().current_annotation.borrow_mut() = None;
+        self.ivars().active_annotation_index.set(None);
         self.commit_text_field();
         self.setNeedsDisplay(true);
     }
@@ -559,4 +603,23 @@ fn resize_rect(orig: CGRect, mode: DragMode, start: CGPoint, current: CGPoint) -
     };
 
     CGRect::new(CGPoint::new(nx, ny), CGSize::new(nw, nh))
+}
+
+/// Draw a dashed highlight border around a selected annotation.
+fn draw_annotation_highlight(ctx: &CGContext, ann: &Annotation) {
+    let rect = ann.bounding_rect();
+    let highlight = CGRect::new(
+        CGPoint::new(rect.origin.x - 2.0, rect.origin.y - 2.0),
+        CGSize::new(rect.size.width + 4.0, rect.size.height + 4.0),
+    );
+
+    CGContext::save_g_state(Some(ctx));
+    CGContext::set_rgb_stroke_color(Some(ctx), 0.2, 0.5, 1.0, 0.8);
+    CGContext::set_line_width(Some(ctx), 1.5);
+    let dash_lengths: [CGFloat; 2] = [4.0, 3.0];
+    unsafe {
+        CGContext::set_line_dash(Some(ctx), 0.0, dash_lengths.as_ptr(), dash_lengths.len());
+    }
+    CGContext::stroke_rect(Some(ctx), highlight);
+    CGContext::restore_g_state(Some(ctx));
 }

@@ -79,4 +79,9 @@ impl ToolbarWindow {
     pub fn hide(&self) {
         self.panel.orderOut(None);
     }
+
+    /// Enable or disable all toolbar buttons except Confirm.
+    pub fn set_non_confirm_buttons_enabled(&self, enabled: bool) {
+        self.view.set_non_confirm_buttons_enabled(enabled);
+    }
 }

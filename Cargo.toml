@@ -39,6 +39,8 @@ objc2-app-kit = { version = "0.3", features = [
     "NSText",
     "NSBezierPath",
     "NSAlert",
+    "NSSlider",
+    "NSSliderCell",
     "NSGestureRecognizer",
     "NSClickGestureRecognizer",
 ] }
