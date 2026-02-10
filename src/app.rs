@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
-use objc2_app_kit::{NSApplicationDelegate, NSColorPanel, NSModalResponseOK, NSSavePanel};
+use objc2_app_kit::{NSApplication, NSApplicationDelegate, NSColorPanel, NSModalResponseOK, NSSavePanel};
 use objc2_core_foundation::{CFRetained, CGFloat, CGPoint};
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
@@ -52,6 +52,14 @@ define_class!(
     unsafe impl NSObjectProtocol for AppDelegate {}
 
     unsafe impl NSApplicationDelegate for AppDelegate {
+        #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
+        fn application_should_terminate_after_last_window_closed(
+            &self,
+            _sender: &NSApplication,
+        ) -> bool {
+            false
+        }
+
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn application_did_finish_launching(&self, _notification: &NSNotification) {
             let mtm = MainThreadMarker::from(self);
@@ -83,7 +91,7 @@ define_class!(
                 );
             }
 
-            eprintln!("Screenshot app started. Ctrl+Cmd+A=capture, Ctrl+Cmd+V=record, Ctrl+Cmd+S=scroll capture.");
+            eprintln!("ClipShot started. Ctrl+Cmd+A=capture, Ctrl+Cmd+V=record, Ctrl+Cmd+S=scroll capture.");
         }
     }
 
@@ -316,9 +324,10 @@ define_class!(
 
         #[unsafe(method(actionCancel:))]
         fn action_cancel(&self, _sender: &AnyObject) {
-            // If editor is open, close it and offer to save raw video
-            if self.ivars().editor_window.borrow().is_some() {
-                self.close_editor_and_save_raw();
+            // If editor is open, ask its window to close (triggers NSWindowWillCloseNotification
+            // which defers cleanup to the next run-loop iteration, avoiding use-after-free)
+            if let Some(ref editor) = *self.ivars().editor_window.borrow() {
+                editor.window.close();
                 return;
             }
             self.ivars().recording_mode.set(false);
@@ -356,12 +365,6 @@ define_class!(
                 return;
             }
 
-            if self.ivars().recording_mode.get() {
-                // In recording mode, confirm starts recording with the selection
-                self.start_recording_with_selection();
-                return;
-            }
-
             // Normal screenshot mode: copy to clipboard
             if let Some(image) = self.get_final_image() {
                 if let Err(e) = crate::actions::copy_to_clipboard(&image) {
@@ -383,6 +386,19 @@ define_class!(
                         let norm = crate::overlay::view::normalize_rect(sel);
                         if norm.size.width > 5.0 && norm.size.height > 5.0 {
                             self.start_scroll_capture_with_selection();
+                            return;
+                        }
+                    }
+                }
+            }
+
+            // In recording mode, auto-start once a valid selection is drawn
+            if self.ivars().recording_mode.get() {
+                if let Some(overlay) = self.ivars().overlay.borrow().as_ref() {
+                    if let Some(sel) = overlay.view.ivars().selection.get() {
+                        let norm = crate::overlay::view::normalize_rect(sel);
+                        if norm.size.width > 5.0 && norm.size.height > 5.0 {
+                            self.start_recording_with_selection();
                             return;
                         }
                     }
@@ -476,6 +492,23 @@ define_class!(
 
         #[unsafe(method(editorWindowClosed:))]
         fn editor_window_closed(&self, _notification: &NSNotification) {
+            // Defer cleanup to next run-loop iteration.  The EditorView that
+            // triggered this (via keyDown → close, or the window's own close
+            // button) is still on the call stack.  Dropping the editor now
+            // would deallocate it and cause a use-after-free / segfault.
+            let this: &AnyObject = unsafe { &*(self as *const Self as *const AnyObject) };
+            unsafe {
+                let _: () = msg_send![
+                    this,
+                    performSelector: sel!(deferredEditorCleanup:),
+                    withObject: std::ptr::null::<AnyObject>(),
+                    afterDelay: 0.0_f64
+                ];
+            }
+        }
+
+        #[unsafe(method(deferredEditorCleanup:))]
+        fn deferred_editor_cleanup(&self, _sender: Option<&AnyObject>) {
             self.close_editor_and_save_raw();
         }
 
@@ -644,11 +677,7 @@ impl AppDelegate {
 
         // Set recording mode and show overlay for region selection
         self.ivars().recording_mode.set(true);
-        // Disable all toolbar buttons except Confirm during region selection
-        if let Some(toolbar) = self.ivars().toolbar.borrow().as_ref() {
-            toolbar.set_non_confirm_buttons_enabled(false);
-        }
-        eprintln!("Record hotkey pressed — select region then confirm");
+        eprintln!("Record hotkey pressed — select region to start recording");
         self.do_capture();
     }
 
@@ -690,7 +719,7 @@ impl AppDelegate {
 
         // Create temp file path
         let tmp_path = std::env::temp_dir().join(format!(
-            "screenshot_recording_{}.mp4",
+            "clipshot_recording_{}.mp4",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -846,7 +875,7 @@ impl AppDelegate {
 
         // Create temp file for export
         let export_path = std::env::temp_dir().join(format!(
-            "screenshot_export_{}.mp4",
+            "clipshot_export_{}.mp4",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -1225,7 +1254,7 @@ impl AppDelegate {
 
         // Use a temporary path for the editor state
         let tmp_path = std::env::temp_dir().join(format!(
-            "screenshot_scroll_{}.png",
+            "clipshot_scroll_{}.png",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()

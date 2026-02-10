@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>Screenshot</string>
+    <string>ClipShot</string>
     <key>CFBundleIdentifier</key>
-    <string>com.screenshot.app</string>
+    <string>com.clipshot.app</string>
     <key>CFBundleVersion</key>
     <string>0.1.0</string>
     <key>CFBundleShortVersionString</key>
@@ -13,6 +13,6 @@
     <key>LSUIElement</key>
     <true/>
     <key>NSScreenCaptureUsageDescription</key>
-    <string>Screenshot needs screen capture permission to take screenshots and record screen video.</string>
+    <string>ClipShot needs screen capture permission to take screenshots and record screen video.</string>
 </dict>
 </plist>

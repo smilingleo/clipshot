@@ -107,6 +107,7 @@ impl EditorWindow {
             )
         };
         window.setTitle(&NSString::from_str(title));
+        unsafe { window.setReleasedWhenClosed(false) };
         window.center();
 
         // Non-flipped layout (origin bottom-left):

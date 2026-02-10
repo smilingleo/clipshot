@@ -112,7 +112,7 @@ pub fn save_to_file(image: &CGImage, mtm: MainThreadMarker) {
     };
 
     let panel = NSSavePanel::new(mtm);
-    panel.setNameFieldStringValue(&NSString::from_str("screenshot.png"));
+    panel.setNameFieldStringValue(&NSString::from_str("clipshot.png"));
 
     let response = panel.runModal();
     if response == NSModalResponseOK {
