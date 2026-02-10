@@ -59,8 +59,9 @@ The app appears as a camera icon in the menu bar with no Dock icon.
 
 1. **Ctrl+Cmd+S** — overlay appears for region selection
 2. Draw a region over scrollable content — capture starts automatically
-3. Frames are stitched into a single tall image
-4. The editor opens for annotation and export as PNG
+3. Stop scrolling and capturing by **Ctrl+Cmd+S** again
+4. Frames are stitched into a single tall image
+5. The editor opens for annotation and export as PNG
 
 ## Annotation Tools
 
