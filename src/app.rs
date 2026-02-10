@@ -354,9 +354,20 @@ define_class!(
 
         #[unsafe(method(actionConfirm:))]
         fn action_confirm(&self, _sender: &AnyObject) {
-            // If editor is open, export with annotations
+            // If editor is open, check for crop mode first
             if self.ivars().editor_window.borrow().is_some() {
-                self.export_editor();
+                let has_crop = {
+                    let editor_ref = self.ivars().editor_window.borrow();
+                    let editor = editor_ref.as_ref().unwrap();
+                    let is_crop_tool = editor.view.ivars().active_tool.get() == ActiveTool::Crop;
+                    let has_crop_rect = editor.view.ivars().crop_rect.get().is_some();
+                    is_crop_tool && has_crop_rect
+                };
+                if has_crop {
+                    self.apply_crop();
+                } else {
+                    self.export_editor();
+                }
                 return;
             }
 
@@ -592,6 +603,11 @@ define_class!(
                     editor.display_current_frame(mtm);
                 }
             }
+        }
+
+        #[unsafe(method(editorApplyCrop:))]
+        fn editor_apply_crop(&self, _sender: &AnyObject) {
+            self.apply_crop();
         }
 
         #[unsafe(method(editorMiniBarChanged:))]
@@ -1022,6 +1038,12 @@ impl AppDelegate {
         if let Some(ref editor) = *self.ivars().editor_window.borrow() {
             editor.view.commit_text_field();
             editor.view.ivars().active_tool.set(tool);
+            // Auto-set crop rect to full view bounds when activating crop tool
+            if tool == ActiveTool::Crop && editor.view.ivars().crop_rect.get().is_none() {
+                let bounds = editor.view.bounds();
+                editor.view.ivars().crop_rect.set(Some(bounds));
+                editor.view.setNeedsDisplay(true);
+            }
             return;
         }
         if let Some(overlay) = self.ivars().overlay.borrow().as_ref() {
@@ -1354,6 +1376,81 @@ impl AppDelegate {
 
         if let Some(image) = final_image {
             crate::actions::save_to_file(&image, mtm);
+        }
+    }
+
+    fn apply_crop(&self) {
+        let mtm = MainThreadMarker::from(self);
+
+        let mut editor_ref = self.ivars().editor_window.borrow_mut();
+        let Some(ref mut editor) = *editor_ref else {
+            return;
+        };
+
+        // Commit any pending text field
+        editor.view.commit_text_field();
+
+        // Get the crop rect (in view coordinates)
+        let Some(crop) = editor.view.ivars().crop_rect.get() else {
+            return;
+        };
+        let norm_crop = crate::overlay::view::normalize_rect(crop);
+
+        // Get the source image
+        let Some(source_image) = editor.decoder.frame_at(0) else {
+            return;
+        };
+
+        // Composite source image + all annotations
+        let state = editor.sessions();
+        let annotations: Vec<&crate::annotation::model::Annotation> = state
+            .annotations
+            .iter()
+            .map(|ta| &ta.annotation)
+            .collect();
+        let width = editor.decoder.width();
+        let height = editor.decoder.height();
+        let composited = crate::editor::export::composite_frame(source_image, &annotations, width, height);
+        drop(state);
+
+        let Some(composited) = composited else {
+            eprintln!("Failed to composite frame for crop");
+            return;
+        };
+
+        // Scale crop rect from view coords to pixel coords
+        let view_bounds = editor.view.bounds();
+        let sx = width as CGFloat / view_bounds.size.width;
+        let sy = height as CGFloat / view_bounds.size.height;
+        let pixel_crop = objc2_core_foundation::CGRect::new(
+            CGPoint::new(norm_crop.origin.x * sx, norm_crop.origin.y * sy),
+            objc2_core_foundation::CGSize::new(norm_crop.size.width * sx, norm_crop.size.height * sy),
+        );
+
+        // Crop the composited image
+        let Some(cropped) = objc2_core_graphics::CGImage::with_image_in_rect(Some(&composited), pixel_crop) else {
+            eprintln!("Failed to crop image");
+            return;
+        };
+
+        // Replace the decoder's image with the cropped result
+        editor.decoder.replace_image(cropped);
+
+        // Clear all annotations (they're now baked into the image)
+        editor.state.borrow_mut().clear_all();
+
+        // Clear crop rect
+        editor.view.ivars().crop_rect.set(None);
+
+        // Resize view/window for new image dimensions
+        editor.resize_for_new_image(mtm);
+
+        // Switch tool to Select and update toolbar
+        editor.view.ivars().active_tool.set(ActiveTool::Select);
+        drop(editor_ref);
+
+        if let Some(toolbar) = self.ivars().toolbar.borrow().as_ref() {
+            toolbar.view.set_active_tool(0); // 0 = Select
         }
     }
 }

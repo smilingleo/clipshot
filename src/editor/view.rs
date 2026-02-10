@@ -330,6 +330,16 @@ define_class!(
                 }
             }
 
+            // Enter = 36 -> apply crop if crop tool is active with a crop rect
+            if key_code == 36 {
+                if self.ivars().active_tool.get() == ActiveTool::Crop
+                    && self.ivars().crop_rect.get().is_some()
+                {
+                    self.notify_delegate_apply_crop();
+                    return;
+                }
+            }
+
             // Space bar = 49 -> toggle play/pause
             if key_code == 49 {
                 self.notify_delegate_play_pause();
@@ -365,6 +375,9 @@ define_class!(
             {
                 if self.ivars().crop_rect.get().is_some() {
                     self.ivars().crop_rect.set(None);
+                    // Switch back to Select tool and notify delegate
+                    self.ivars().active_tool.set(ActiveTool::Select);
+                    self.notify_tool_changed();
                     self.setNeedsDisplay(true);
                     return;
                 }
@@ -651,6 +664,14 @@ impl EditorView {
         }
     }
 
+    fn notify_delegate_apply_crop(&self) {
+        let mtm = MainThreadMarker::from(self);
+        let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+        if let Some(delegate) = app.delegate() {
+            let _: () = unsafe { msg_send![&*delegate, editorApplyCrop: self] };
+        }
+    }
+
     /// Notify the app delegate that the tool changed (from keyboard shortcut).
     fn notify_tool_changed(&self) {
         let tool = self.ivars().active_tool.get();
@@ -746,12 +767,38 @@ fn draw_crop_overlay(
 ) {
     CGContext::save_g_state(Some(ctx));
 
-    // Draw semi-transparent dark overlay over the entire view
-    CGContext::set_rgb_fill_color(Some(ctx), 0.0, 0.0, 0.0, 0.5);
-    CGContext::fill_rect(Some(ctx), bounds);
+    // Draw semi-transparent dark overlay on the 4 strips outside the crop rect.
+    // We avoid CGContext::clear_rect because it erases the image underneath.
+    let bx = bounds.origin.x;
+    let by = bounds.origin.y;
+    let bw = bounds.size.width;
+    let bh = bounds.size.height;
+    let cx = crop.origin.x;
+    let cy = crop.origin.y;
+    let cw = crop.size.width;
+    let ch = crop.size.height;
 
-    // Clear the crop region (punch a hole)
-    CGContext::clear_rect(Some(ctx), crop);
+    CGContext::set_rgb_fill_color(Some(ctx), 0.0, 0.0, 0.0, 0.5);
+    // Top strip
+    if cy > by {
+        CGContext::fill_rect(Some(ctx), CGRect::new(CGPoint::new(bx, by), CGSize::new(bw, cy - by)));
+    }
+    // Bottom strip
+    let crop_bottom = cy + ch;
+    let bounds_bottom = by + bh;
+    if crop_bottom < bounds_bottom {
+        CGContext::fill_rect(Some(ctx), CGRect::new(CGPoint::new(bx, crop_bottom), CGSize::new(bw, bounds_bottom - crop_bottom)));
+    }
+    // Left strip (between top and bottom strips)
+    if cx > bx {
+        CGContext::fill_rect(Some(ctx), CGRect::new(CGPoint::new(bx, cy), CGSize::new(cx - bx, ch)));
+    }
+    // Right strip (between top and bottom strips)
+    let crop_right = cx + cw;
+    let bounds_right = bx + bw;
+    if crop_right < bounds_right {
+        CGContext::fill_rect(Some(ctx), CGRect::new(CGPoint::new(crop_right, cy), CGSize::new(bounds_right - crop_right, ch)));
+    }
 
     // Draw dashed border around the crop rect
     CGContext::set_rgb_stroke_color(Some(ctx), 1.0, 1.0, 1.0, 0.9);

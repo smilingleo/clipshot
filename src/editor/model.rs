@@ -152,6 +152,13 @@ impl EditorState {
         self.active_annotation = None;
     }
 
+    /// Clear all annotations, redo stack, and active annotation (used after crop bakes them in).
+    pub fn clear_all(&mut self) {
+        self.annotations.clear();
+        self.redo_stack.clear();
+        self.active_annotation = None;
+    }
+
     /// Hit-test annotations at a point for the given frame. Returns the topmost match.
     pub fn hit_test_annotation(&self, point: CGPoint, frame: usize) -> Option<usize> {
         // Iterate in reverse so topmost (last drawn) is found first

@@ -462,6 +462,51 @@ impl EditorWindow {
         self.minibar_view.setHidden(true);
     }
 
+    /// Recalculate and resize the view/window based on current decoder dimensions.
+    /// Used after crop to fit the new image size.
+    pub fn resize_for_new_image(&self, mtm: MainThreadMarker) {
+        let dec_width = self.decoder.width();
+        let dec_height = self.decoder.height();
+
+        // Scale up if image height is less than 800px
+        const MIN_HEIGHT: CGFloat = 800.0;
+        let native_w = dec_width as CGFloat;
+        let native_h = dec_height as CGFloat;
+        let (view_w, view_h) = if native_h < MIN_HEIGHT {
+            let scale = MIN_HEIGHT / native_h;
+            ((native_w * scale).round(), MIN_HEIGHT)
+        } else {
+            (native_w, native_h)
+        };
+
+        // For single-frame mode, cap height at screen height - 100
+        let screen = crate::screen::screen_with_mouse(mtm);
+        let screen_height = screen.frame().size.height;
+        let max_view_h = screen_height - 100.0;
+        let (view_w, view_h) = if self.is_single_frame && view_h > max_view_h {
+            let scale = max_view_h / view_h;
+            ((view_w * scale).round(), max_view_h)
+        } else {
+            (view_w, view_h)
+        };
+
+        let progress_height = if self.is_single_frame { 0.0 } else { PROGRESS_BAR_HEIGHT };
+
+        // Resize the editor view
+        self.view.setFrame(NSRect::new(
+            CGPoint::new(0.0, progress_height),
+            CGSize::new(view_w, view_h),
+        ));
+
+        // Resize the window content
+        let window_size = NSSize::new(view_w, view_h + progress_height);
+        self.window.setContentSize(window_size);
+        self.window.center();
+
+        // Refresh display
+        self.display_current_frame(mtm);
+    }
+
     /// Close the editor window and clean up.
     pub fn close(&self) {
         if let Some(timer) = self.timer.borrow_mut().take() {

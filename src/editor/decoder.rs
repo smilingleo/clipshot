@@ -149,6 +149,15 @@ impl VideoDecoder {
     pub fn height(&self) -> usize {
         self.height
     }
+
+    /// Replace the decoder's image with a new one (used for crop).
+    pub fn replace_image(&mut self, image: CFRetained<CGImage>) {
+        let width = CGImage::width(Some(&image));
+        let height = CGImage::height(Some(&image));
+        self.frames = vec![image];
+        self.width = width;
+        self.height = height;
+    }
 }
 
 /// Convert a CVPixelBuffer (BGRA) to a CGImage via CGBitmapContext.
