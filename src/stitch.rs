@@ -1,3 +1,5 @@
+use std::hash::{Hash, Hasher};
+
 use objc2_core_foundation::{CFRetained, CGFloat, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext, CGImage,
@@ -5,8 +7,15 @@ use objc2_core_graphics::{
 };
 
 /// Stitch multiple captured frames into a single tall image by detecting overlapping regions.
-pub fn stitch_frames(frames: &[CFRetained<CGImage>]) -> Option<CFRetained<CGImage>> {
-    if frames.is_empty() {
+///
+/// `rgba_data` contains pre-converted RGBA pixel data for each frame, captured at the same
+/// time as the CGImages. This avoids CGImage copy-on-write issues where backing data becomes
+/// stale between capture time and stitch time.
+pub fn stitch_frames(
+    frames: &[CFRetained<CGImage>],
+    rgba_data: &[Vec<u8>],
+) -> Option<CFRetained<CGImage>> {
+    if frames.is_empty() || rgba_data.len() != frames.len() {
         return None;
     }
     if frames.len() == 1 {
@@ -16,26 +25,12 @@ pub fn stitch_frames(frames: &[CFRetained<CGImage>]) -> Option<CFRetained<CGImag
     let frame_width = CGImage::width(Some(&frames[0]));
     let frame_height = CGImage::height(Some(&frames[0]));
 
-    // Pre-convert all frames to RGBA once (avoids redundant conversions per pair)
-    let start = std::time::Instant::now();
-    let mut rgba_data: Vec<Vec<u8>> = Vec::with_capacity(frames.len());
-    for (i, f) in frames.iter().enumerate() {
-        match crate::actions::cgimage_to_rgba(f) {
-            Ok(data) => rgba_data.push(data),
-            Err(e) => {
-                eprintln!("Stitch: RGBA conversion failed for frame {}: {}", i, e);
-                return None;
-            }
-        }
-    }
-    eprintln!("Stitch: RGBA conversion took {:?}", start.elapsed());
-
     // Find overlap between each consecutive pair
     let start = std::time::Instant::now();
     let mut overlaps = Vec::with_capacity(frames.len() - 1);
     for i in 0..frames.len() - 1 {
         let overlap =
-            find_overlap_fast(&rgba_data[i], &rgba_data[i + 1], frame_width, frame_height);
+            find_overlap(&rgba_data[i], &rgba_data[i + 1], frame_width, frame_height);
         overlaps.push(overlap);
     }
     eprintln!(
@@ -58,70 +53,79 @@ pub fn stitch_frames(frames: &[CFRetained<CGImage>]) -> Option<CFRetained<CGImag
         return None;
     }
 
-    // Create the output canvas
+    // Compose output directly from RGBA byte data (avoids CGImage stale-data issues).
+    // Both source and output use the same layout: RGBA 8bpc, top-down, row-major.
     let start = std::time::Instant::now();
-    let color_space = CGColorSpace::new_device_rgb()?;
-    let bitmap_info = CGImageAlphaInfo::PremultipliedLast.0;
-    let ctx = unsafe {
-        CGBitmapContextCreate(
-            std::ptr::null_mut(),
-            frame_width,
-            total_height,
-            8,
-            frame_width * 4,
-            Some(&color_space),
-            bitmap_info,
-        )
-    }?;
+    let bpr = frame_width * 4;
+    let mut output = vec![0u8; bpr * total_height];
+    let mut current_row: usize = 0;
 
-    // Draw frames top to bottom (CGBitmapContext origin = bottom-left)
-    let mut current_y = total_height;
+    // First frame: copy all rows
+    let copy_bytes = bpr * frame_height;
+    output[..copy_bytes].copy_from_slice(&rgba_data[0][..copy_bytes]);
+    current_row += frame_height;
 
-    // First frame
-    current_y -= frame_height;
-    let draw_rect = CGRect::new(
-        CGPoint::new(0.0, current_y as CGFloat),
-        CGSize::new(frame_width as CGFloat, frame_height as CGFloat),
-    );
-    CGContext::draw_image(Some(&ctx), draw_rect, Some(&frames[0]));
-
-    // Subsequent frames — crop out overlapping portion
+    // Subsequent frames: copy only non-overlapping rows
     for (i, &overlap) in overlaps.iter().enumerate() {
         let addition = frame_height.saturating_sub(overlap);
         if addition == 0 {
             continue;
         }
 
-        let crop_rect = CGRect::new(
-            CGPoint::new(0.0, overlap as CGFloat),
-            CGSize::new(frame_width as CGFloat, addition as CGFloat),
-        );
-        if let Some(cropped) = CGImage::with_image_in_rect(Some(&frames[i + 1]), crop_rect) {
-            current_y -= addition;
-            let draw_rect = CGRect::new(
-                CGPoint::new(0.0, current_y as CGFloat),
-                CGSize::new(frame_width as CGFloat, addition as CGFloat),
-            );
-            CGContext::draw_image(Some(&ctx), draw_rect, Some(&cropped));
-        }
+        let src = &rgba_data[i + 1];
+        let src_start = overlap * bpr;
+        let src_end = src_start + addition * bpr;
+        let dst_start = current_row * bpr;
+        let dst_end = dst_start + addition * bpr;
+        output[dst_start..dst_end].copy_from_slice(&src[src_start..src_end]);
+        current_row += addition;
     }
 
     eprintln!("Stitch: canvas compositing took {:?}", start.elapsed());
 
-    CGBitmapContextCreateImage(Some(&ctx))
+    // Create CGImage from the composited buffer
+    let color_space = CGColorSpace::new_device_rgb()?;
+    let bitmap_info = CGImageAlphaInfo::PremultipliedLast.0;
+    let ctx = unsafe {
+        CGBitmapContextCreate(
+            output.as_mut_ptr() as *mut _,
+            frame_width,
+            total_height,
+            8,
+            bpr,
+            Some(&color_space),
+            bitmap_info,
+        )
+    }?;
+
+    let image = CGBitmapContextCreateImage(Some(&ctx));
+    drop(ctx);
+    drop(output);
+    image
 }
 
-/// Fast overlap detection using strip matching:
+/// Hash one pixel row's RGB bytes over the column range `[byte_start, byte_end)`.
+/// Uses `DefaultHasher` to produce a `u64` fingerprint.
+#[inline]
+fn hash_row(data: &[u8], row: usize, bpr: usize, byte_start: usize, byte_end: usize) -> u64 {
+    let mut hasher = std::hash::DefaultHasher::new();
+    let base = row * bpr;
+    let start = base + byte_start;
+    let end = base + byte_end;
+    if end <= data.len() {
+        data[start..end].hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Detect overlap between two consecutive frames using row hashing.
 ///
-/// Instead of comparing variable-size overlap regions (which biases toward small K
-/// where fewer pixels make accidental matches likely), we take a fixed-size reference
-/// strip from frame A and slide it through frame B. The constant strip size ensures
-/// equal signal for all candidate positions, eliminating the small-K false match problem.
-///
-/// 1. Sparse probe: ~48 positions, 8x column subsampling
-/// 2. Refine: ±probe_step around the best, 2x column subsampling
-/// 3. Verify: full overlap region with moderate subsampling
-fn find_overlap_fast(
+/// Two-phase algorithm:
+/// 1. Hash rows in the search regions of both frames.
+/// 2. Pick a reference row from A, find candidate overlap values by matching its hash in B.
+/// 3. For each candidate, count contiguous matching row hashes. The candidate with the
+///    longest run wins. Requires a minimum run of 20 rows to accept.
+fn find_overlap(
     data_a: &[u8],
     data_b: &[u8],
     width: usize,
@@ -132,183 +136,228 @@ fn find_overlap_fast(
     }
 
     let bpr = width * 4;
-    let max_overlap = height * 19 / 20;
-    let margin = width / 20;
-    let col_start = margin;
-    let col_end = width.saturating_sub(margin);
-    if col_end <= col_start {
+    // Asymmetric margins: include left edge content (row numbers etc. make rows unique)
+    // but exclude rightmost 5% to avoid scrollbar interference.
+    let byte_start = 0;
+    let right_margin = width / 20;
+    let byte_end = width.saturating_sub(right_margin) * 4;
+    if byte_end <= byte_start {
         return 0;
     }
 
-    // Reference strip: 16 rows from the bottom sixth of frame A.
-    // Positioned to be roughly centered in the expected overlap region
-    // (we scroll 2/3 of height, so overlap ≈ 1/3 of height).
-    let strip_rows = 16.min(height / 4);
-    let strip_offset = height / 6; // distance from bottom of A to start of strip
-    let strip_a_start = height - strip_offset;
+    // Search range covers up to 95% of the frame height to handle high-overlap frames
+    // near the end of scrollable content (scroll_capture stop conditions operate at 80-95%)
+    let search_range = height * 19 / 20;
 
-    // With overlap of k rows, the strip appears at row (k - strip_offset) in B.
-    // Valid when k >= strip_offset. Max position = max_overlap - strip_offset - strip_rows.
-    let max_pos_b = max_overlap
-        .saturating_sub(strip_offset)
-        .saturating_sub(strip_rows);
+    // Hash bottom `search_range` rows of A
+    let a_start_row = height - search_range;
+    let hashes_a: Vec<u64> = (0..search_range)
+        .map(|i| hash_row(data_a, a_start_row + i, bpr, byte_start, byte_end))
+        .collect();
 
-    if strip_rows < 4 || max_pos_b == 0 {
-        return 0;
-    }
+    // Hash top `search_range` rows of B
+    let hashes_b: Vec<u64> = (0..search_range)
+        .map(|i| hash_row(data_b, i, bpr, byte_start, byte_end))
+        .collect();
 
-    // Phase 1: Sparse probe — ~48 positions with 8x column subsampling
-    let probe_step = (max_pos_b / 48).max(1);
-    let mut best_pos: usize = 0;
-    let mut best_sad = f64::MAX;
+    // Reference row: height/6 above the bottom of A, which sits roughly in the middle
+    // of the expected overlap zone (overlap ≈ height/3)
+    let ref_offset_from_bottom = height / 6;
+    let ref_row_in_a = height - ref_offset_from_bottom; // absolute row in A
+    let ref_idx_in_hashes_a = ref_row_in_a - a_start_row; // index into hashes_a
+    let ref_hash = hashes_a[ref_idx_in_hashes_a];
 
-    let mut pos = 0;
-    while pos <= max_pos_b {
-        let sad = strip_sad(
-            data_a, data_b, bpr, col_start, col_end, strip_a_start, pos, strip_rows, 8,
-        );
-        if sad < best_sad {
-            best_sad = sad;
-            best_pos = pos;
+    // Find candidate overlaps: for each position in B where the reference hash matches,
+    // compute the implied overlap.
+    //
+    // If overlap is K rows, then:
+    //   - bottom K rows of A (rows [height-K .. height)) align with top K rows of B (rows [0..K))
+    //   - ref_row_in_a (absolute) maps to B row: ref_row_in_a - (height - K) = K - ref_offset_from_bottom
+    //
+    // So if hashes_b[j] matches, then j = K - ref_offset_from_bottom → K = j + ref_offset_from_bottom
+    let mut best_overlap: usize = 0;
+    let mut best_run: usize = 0;
+    let mut best_matches: usize = 0;
+    let mut best_rate: usize = 0; // match rate in permille (matches * 1000 / candidate_k)
+
+    for (j, &h) in hashes_b.iter().enumerate() {
+        if h != ref_hash {
+            continue;
         }
-        pos += probe_step;
-    }
 
-    if best_sad > 30.0 {
-        return 0;
-    }
+        let candidate_k = j + ref_offset_from_bottom;
+        if candidate_k == 0 || candidate_k > height {
+            continue;
+        }
 
-    // Phase 2: Refine — ±probe_step around best with 2x column subsampling
-    let lo = best_pos.saturating_sub(probe_step);
-    let hi = (best_pos + probe_step).min(max_pos_b);
-    best_sad = f64::MAX;
+        // Verify candidate by scanning ALL overlap rows for matching hashes.
+        // Don't break on first mismatch — dynamic elements (cursor, selection border,
+        // scrollbar) can cause isolated row differences in otherwise identical content.
+        let a_overlap_start = height - candidate_k; // first overlapping row in A
 
-    for pos in lo..=hi {
-        let sad = strip_sad(
-            data_a, data_b, bpr, col_start, col_end, strip_a_start, pos, strip_rows, 2,
-        );
-        if sad < best_sad {
-            best_sad = sad;
-            best_pos = pos;
+        let mut longest_run: usize = 0;
+        let mut current_run: usize = 0;
+        let mut total_matches: usize = 0;
+
+        for r in 0..candidate_k {
+            let a_abs_row = a_overlap_start + r;
+            let b_abs_row = r;
+
+            let ha = if a_abs_row >= a_start_row {
+                hashes_a[a_abs_row - a_start_row]
+            } else {
+                hash_row(data_a, a_abs_row, bpr, byte_start, byte_end)
+            };
+
+            let hb = if b_abs_row < search_range {
+                hashes_b[b_abs_row]
+            } else {
+                hash_row(data_b, b_abs_row, bpr, byte_start, byte_end)
+            };
+
+            if ha == hb {
+                current_run += 1;
+                total_matches += 1;
+                if current_run > longest_run {
+                    longest_run = current_run;
+                }
+            } else {
+                current_run = 0;
+            }
+        }
+
+        // Score by match rate (not absolute count) to avoid large-overlap bias.
+        // A correct overlap of 170 rows with 95% matches should beat a coincidental
+        // overlap of 500 rows with 90% matches.
+        let rate = if candidate_k > 0 {
+            total_matches * 1000 / candidate_k
+        } else {
+            0
+        };
+        if rate > best_rate || (rate == best_rate && longest_run > best_run) {
+            best_rate = rate;
+            best_matches = total_matches;
+            best_run = longest_run;
+            best_overlap = candidate_k;
         }
     }
 
-    if best_sad > 20.0 {
-        return 0;
-    }
+    // Accept if enough rows match: either a decent contiguous run or a large
+    // fraction of the overlap. Even 8 consecutive exact row-hash matches is
+    // unambiguous (8 × 64 = 512 bits of entropy).
+    let min_run = 8;
+    let min_match_fraction = 4; // at least 1/4 of overlap rows must match
+    let min_matches = min_run.max(best_overlap / min_match_fraction);
 
-    let overlap = best_pos + strip_offset;
-
-    // Phase 3: Verify — check the full overlap region with moderate subsampling
-    let verify_sad = compute_sad(data_a, data_b, bpr, width, height, overlap, 4);
-
-    if verify_sad > 20.0 {
+    if best_matches < min_matches && best_run < min_run {
         eprintln!(
-            "No reliable overlap (verified SAD={:.1} at {} rows)",
-            verify_sad, overlap
+            "Hash matching failed (best run {}, matches {}/{}, need run≥{} or matches≥{}), trying SAD fallback",
+            best_run, best_matches, best_overlap, min_run, min_matches
+        );
+        return find_overlap_sad(data_a, data_b, width, height);
+    }
+
+    if best_overlap >= height {
+        return height;
+    }
+
+    eprintln!(
+        "Overlap: {} rows (run: {}, matches: {}/{})",
+        best_overlap, best_run, best_matches, best_overlap
+    );
+    best_overlap
+}
+
+/// SAD-based fallback for overlap detection when hash matching fails.
+///
+/// Used when pixel values aren't byte-identical between frames (e.g., subpixel rendering
+/// differences with small selections). Slides a multi-row reference strip from A through
+/// B, finding the position with minimum average per-channel SAD.
+fn find_overlap_sad(
+    data_a: &[u8],
+    data_b: &[u8],
+    width: usize,
+    height: usize,
+) -> usize {
+    let bpr = width * 4;
+    let byte_start = 0;
+    let right_margin = width / 20;
+    let byte_end = width.saturating_sub(right_margin) * 4;
+    if byte_end <= byte_start {
+        return 0;
+    }
+
+    // Reference strip: 10 rows centered at height/6 above A's bottom
+    let strip_rows = 10.min(height / 4);
+    if strip_rows == 0 {
+        return 0;
+    }
+    let ref_center = height - height / 6;
+    let ref_start = ref_center
+        .saturating_sub(strip_rows / 2)
+        .min(height - strip_rows);
+
+    let search_range = height * 19 / 20;
+    let search_limit = search_range.saturating_sub(strip_rows);
+
+    let mut best_sad = f64::MAX;
+    let mut best_pos: usize = 0;
+
+    for candidate in 0..=search_limit {
+        let mut sad_sum: u64 = 0;
+        let mut pixel_count: u64 = 0;
+
+        for r in 0..strip_rows {
+            let a_base = (ref_start + r) * bpr;
+            let b_base = (candidate + r) * bpr;
+
+            // Sample every 4th pixel for speed
+            let mut offset = byte_start;
+            while offset + 3 < byte_end {
+                let ai = a_base + offset;
+                let bi = b_base + offset;
+                if ai + 2 < data_a.len() && bi + 2 < data_b.len() {
+                    for c in 0..3 {
+                        sad_sum += (data_a[ai + c] as i32 - data_b[bi + c] as i32)
+                            .unsigned_abs() as u64;
+                    }
+                    pixel_count += 1;
+                }
+                offset += 16; // every 4th pixel
+            }
+        }
+
+        if pixel_count > 0 {
+            let avg = sad_sum as f64 / (pixel_count as f64 * 3.0);
+            if avg < best_sad {
+                best_sad = avg;
+                best_pos = candidate;
+            }
+        }
+    }
+
+    if best_sad > 15.0 {
+        eprintln!(
+            "SAD fallback: no match (best avg SAD {:.1} at pos {})",
+            best_sad, best_pos
         );
         return 0;
     }
+
+    // Convert position to overlap:
+    // Row ref_start in A aligns with row best_pos in B.
+    // If overlap is K, row ref_start = height - K + best_pos → K = height - ref_start + best_pos
+    let overlap = height - ref_start + best_pos;
 
     if overlap >= height {
         return height;
     }
 
-    eprintln!("Overlap: {} rows (SAD={:.2})", overlap, verify_sad);
+    eprintln!(
+        "SAD fallback: overlap {} rows (avg SAD {:.1} at B row {})",
+        overlap, best_sad, best_pos
+    );
     overlap
-}
-
-/// Compute average per-channel SAD between a strip of rows in A and a strip of rows in B.
-/// Only considers columns in `[col_start, col_end)` with the given step.
-#[inline]
-fn strip_sad(
-    data_a: &[u8],
-    data_b: &[u8],
-    bpr: usize,
-    col_start: usize,
-    col_end: usize,
-    a_start: usize,
-    b_start: usize,
-    rows: usize,
-    col_step: usize,
-) -> f64 {
-    let mut sad_sum: u64 = 0;
-    let mut count: u64 = 0;
-
-    for r in 0..rows {
-        let a_base = (a_start + r) * bpr;
-        let b_base = (b_start + r) * bpr;
-
-        let mut col = col_start;
-        while col < col_end {
-            let ap = a_base + col * 4;
-            let bp = b_base + col * 4;
-            if ap + 2 < data_a.len() && bp + 2 < data_b.len() {
-                sad_sum += (data_a[ap] as i32 - data_b[bp] as i32).unsigned_abs() as u64;
-                sad_sum +=
-                    (data_a[ap + 1] as i32 - data_b[bp + 1] as i32).unsigned_abs() as u64;
-                sad_sum +=
-                    (data_a[ap + 2] as i32 - data_b[bp + 2] as i32).unsigned_abs() as u64;
-                count += 1;
-            }
-            col += col_step;
-        }
-    }
-
-    if count == 0 {
-        return f64::MAX;
-    }
-    sad_sum as f64 / (count as f64 * 3.0)
-}
-
-/// Compute average per-channel SAD between bottom K rows of A and top K rows of B.
-/// `step`: subsample factor for both rows and columns.
-#[inline]
-fn compute_sad(
-    data_a: &[u8],
-    data_b: &[u8],
-    bpr: usize,
-    width: usize,
-    height: usize,
-    k: usize,
-    step: usize,
-) -> f64 {
-    let mut sad_sum: u64 = 0;
-    let mut count: u64 = 0;
-
-    // Skip leftmost and rightmost 5% of columns to avoid scrollbar/UI-overlay interference
-    let margin = width / 20;
-    let col_start = margin;
-    let col_end = width.saturating_sub(margin);
-
-    let mut row = 0;
-    while row < k {
-        let a_row = height - k + row;
-        let b_row = row;
-        let a_base = a_row * bpr;
-        let b_base = b_row * bpr;
-
-        let mut col = col_start;
-        while col < col_end {
-            let ap = a_base + col * 4;
-            let bp = b_base + col * 4;
-            if ap + 2 < data_a.len() && bp + 2 < data_b.len() {
-                sad_sum += (data_a[ap] as i32 - data_b[bp] as i32).unsigned_abs() as u64;
-                sad_sum +=
-                    (data_a[ap + 1] as i32 - data_b[bp + 1] as i32).unsigned_abs() as u64;
-                sad_sum +=
-                    (data_a[ap + 2] as i32 - data_b[bp + 2] as i32).unsigned_abs() as u64;
-                count += 1;
-            }
-            col += step;
-        }
-        row += step;
-    }
-
-    if count == 0 {
-        return f64::MAX;
-    }
-    sad_sum as f64 / (count as f64 * 3.0)
 }
 
 /// Create a copy of a CGImage via bitmap context.

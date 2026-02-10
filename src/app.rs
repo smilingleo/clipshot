@@ -1183,10 +1183,10 @@ impl AppDelegate {
             state.set_border_window_id(border.window_number());
         }
 
-        // Capture initial frame before starting timer
-        state.capture_initial_frame();
-
-        // Start timer for scroll capture ticks
+        // The first timer tick captures the initial frame (Phase::Capture).
+        // We don't capture synchronously here because dismiss_all() above is
+        // asynchronous — the overlay window is still visible until the run loop
+        // processes its removal. The timer delay gives the UI time to settle.
         let target: &AnyObject = unsafe { &*(self as *const Self as *const AnyObject) };
         let timer = unsafe {
             NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
@@ -1240,8 +1240,8 @@ impl AppDelegate {
             return;
         }
 
-        // Stitch frames
-        let stitched = crate::stitch::stitch_frames(&state.frames);
+        // Stitch frames using pre-captured RGBA data for overlap detection
+        let stitched = crate::stitch::stitch_frames(&state.frames, &state.frame_rgba);
         let Some(stitched) = stitched else {
             eprintln!("Failed to stitch frames");
             return;

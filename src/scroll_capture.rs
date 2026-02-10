@@ -31,6 +31,10 @@ pub struct ScrollCaptureState {
     pub settle_delay: f64,
     /// Captured frames (in pixel coordinates, cropped to selection).
     pub frames: Vec<CFRetained<CGImage>>,
+    /// RGBA pixel data captured at the same time as each frame.
+    /// Stored immediately at capture time to avoid CGImage copy-on-write issues
+    /// where backing data becomes stale after subsequent screen captures.
+    pub frame_rgba: Vec<Vec<u8>>,
     /// Timer driving the capture loop.
     pub timer: Option<Retained<NSTimer>>,
     /// Number of scroll steps performed so far.
@@ -57,9 +61,10 @@ impl ScrollCaptureState {
             max_steps: 50,
             settle_delay: 0.5,
             frames: Vec::new(),
+            frame_rgba: Vec::new(),
             timer: None,
             step_count: 0,
-            phase: Phase::Scroll,
+            phase: Phase::Capture,
             border_window_id: None,
             display_id,
         }
@@ -68,14 +73,6 @@ impl ScrollCaptureState {
     /// Set the border window ID to exclude from screen captures.
     pub fn set_border_window_id(&mut self, id: u32) {
         self.border_window_id = Some(id);
-    }
-
-    /// Capture the initial frame (before the timer starts).
-    pub fn capture_initial_frame(&mut self) {
-        if let Some(frame) = self.capture_and_crop() {
-            eprintln!("Scroll capture: initial frame captured");
-            self.frames.push(frame);
-        }
     }
 
     /// Called by the timer on each tick. Returns false to signal stop.
@@ -112,6 +109,18 @@ impl ScrollCaptureState {
                     return true;
                 };
 
+                // Convert to RGBA immediately while the screen capture data is fresh.
+                // CGImage backing data can become stale due to copy-on-write semantics,
+                // so we capture the bytes now for reliable overlap detection later.
+                let rgba = match crate::actions::cgimage_to_rgba(&frame) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        eprintln!("Scroll capture: RGBA conversion failed: {}", e);
+                        self.phase = Phase::Scroll;
+                        return true;
+                    }
+                };
+
                 // Check overlap with previous frame to detect end of scrollable content
                 if let Some(prev) = self.frames.last() {
                     let frame_height = CGImage::height(Some(prev));
@@ -130,11 +139,13 @@ impl ScrollCaptureState {
                             overlap, frame_height
                         );
                         self.frames.push(frame);
+                        self.frame_rgba.push(rgba);
                         return false;
                     }
                 }
 
                 self.frames.push(frame);
+                self.frame_rgba.push(rgba);
                 eprintln!("Scroll capture: frame {} captured", self.frames.len());
                 self.phase = Phase::Scroll;
                 true
