@@ -18,10 +18,16 @@ pub fn stitch_frames(frames: &[CFRetained<CGImage>]) -> Option<CFRetained<CGImag
 
     // Pre-convert all frames to RGBA once (avoids redundant conversions per pair)
     let start = std::time::Instant::now();
-    let rgba_data: Vec<Vec<u8>> = frames
-        .iter()
-        .map(|f| crate::actions::cgimage_to_rgba(f).unwrap_or_default())
-        .collect();
+    let mut rgba_data: Vec<Vec<u8>> = Vec::with_capacity(frames.len());
+    for (i, f) in frames.iter().enumerate() {
+        match crate::actions::cgimage_to_rgba(f) {
+            Ok(data) => rgba_data.push(data),
+            Err(e) => {
+                eprintln!("Stitch: RGBA conversion failed for frame {}: {}", i, e);
+                return None;
+            }
+        }
+    }
     eprintln!("Stitch: RGBA conversion took {:?}", start.elapsed());
 
     // Find overlap between each consecutive pair
@@ -120,10 +126,10 @@ fn find_overlap_fast(
     }
 
     let bpr = width * 4;
-    let max_overlap = height * 3 / 4;
+    let max_overlap = height * 19 / 20;
 
-    // Phase 1: Sparse probe — ~24 evenly-spaced candidates with 16x subsample
-    let probe_step = (max_overlap / 24).max(1);
+    // Phase 1: Sparse probe — ~48 evenly-spaced candidates with 16x subsample
+    let probe_step = (max_overlap / 48).max(1);
     let mut best_k: usize = 0;
     let mut best_sad = f64::MAX;
 
@@ -137,7 +143,7 @@ fn find_overlap_fast(
         k += probe_step;
     }
 
-    if best_sad > 20.0 {
+    if best_sad > 30.0 {
         return 0;
     }
 
@@ -157,14 +163,14 @@ fn find_overlap_fast(
         }
     }
 
-    if best_sad > 15.0 {
+    if best_sad > 20.0 {
         return 0;
     }
 
     // Phase 3: Verify the best candidate with full pixels (subsample=1)
     let final_sad = compute_sad(data_a, data_b, bpr, width, height, best_k, 1);
 
-    if final_sad > 15.0 {
+    if final_sad > 20.0 {
         eprintln!(
             "No reliable overlap (verified SAD={:.1} at {} rows)",
             final_sad, best_k
@@ -195,6 +201,11 @@ fn compute_sad(
     let mut sad_sum: u64 = 0;
     let mut count: u64 = 0;
 
+    // Skip leftmost and rightmost 5% of columns to avoid scrollbar/UI-overlay interference
+    let margin = width / 20;
+    let col_start = margin;
+    let col_end = width.saturating_sub(margin);
+
     let mut row = 0;
     while row < k {
         let a_row = height - k + row;
@@ -202,8 +213,8 @@ fn compute_sad(
         let a_base = a_row * bpr;
         let b_base = b_row * bpr;
 
-        let mut col = 0;
-        while col < width {
+        let mut col = col_start;
+        while col < col_end {
             let ap = a_base + col * 4;
             let bp = b_base + col * 4;
             if ap + 2 < data_a.len() && bp + 2 < data_b.len() {

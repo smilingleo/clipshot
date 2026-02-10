@@ -22,7 +22,7 @@ const HID_EVENT_TAP: u32 = 0;
 
 /// Simulate a pixel-based scroll wheel event at the given screen point.
 ///
-/// `screen_point` uses macOS native coordinates (origin at bottom-left).
+/// `screen_point` uses CG global coordinates (origin at top-left of primary display).
 /// `delta_pixels`: negative = scroll down (content moves up), positive = scroll up.
 pub fn simulate_scroll(screen_point: CGPoint, delta_pixels: i32) {
     unsafe {
@@ -42,9 +42,12 @@ pub fn simulate_scroll(screen_point: CGPoint, delta_pixels: i32) {
     }
 }
 
-/// Convert a point from flipped (top-left origin) coordinates to macOS
-/// native screen coordinates (bottom-left origin).
-pub fn flipped_to_screen(x: CGFloat, y: CGFloat, screen_height: CGFloat) -> CGPoint {
-    CGPoint::new(x, screen_height - y)
+/// Convert a point from overlay coordinates (top-left origin, relative to display)
+/// to CG global coordinates (top-left origin of primary display).
+///
+/// Both coordinate systems use top-left origin, so this is a simple offset
+/// by the display's CG origin.
+pub fn overlay_to_cg_global(x: CGFloat, y: CGFloat, screen_origin: CGPoint) -> CGPoint {
+    CGPoint::new(screen_origin.x + x, screen_origin.y + y)
 }
 

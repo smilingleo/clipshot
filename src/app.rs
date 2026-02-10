@@ -6,7 +6,7 @@ use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{NSApplication, NSApplicationDelegate, NSColorPanel, NSModalResponseOK, NSSavePanel};
 use objc2_core_foundation::{CFRetained, CGFloat, CGPoint};
-use objc2_core_graphics::CGImage;
+use objc2_core_graphics::{CGDisplayBounds, CGImage};
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSString, NSTimer,
 };
@@ -1168,11 +1168,13 @@ impl AppDelegate {
             border.show(selection, screen_frame);
         }
 
-        // Create scroll capture state
+        // Create scroll capture state — use CG display origin for coordinate conversion
+        let cg_bounds = CGDisplayBounds(display_id);
+        let screen_origin = CGPoint::new(cg_bounds.origin.x, cg_bounds.origin.y);
         let mut state = ScrollCaptureState::new(
             selection,
             scale_factor,
-            screen_frame.size.height,
+            screen_origin,
             display_id,
         );
 

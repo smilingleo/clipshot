@@ -23,8 +23,8 @@ pub struct ScrollCaptureState {
     pub selection: CGRect,
     /// Display scale factor (e.g. 2.0 for Retina).
     pub scale_factor: CGFloat,
-    /// Screen height in logical points (for coordinate conversion).
-    pub screen_height: CGFloat,
+    /// CG global origin of the display (from CGDisplayBounds, top-left origin).
+    pub screen_origin: CGPoint,
     /// Maximum number of scroll steps before auto-stop.
     pub max_steps: usize,
     /// Delay between timer ticks in seconds.
@@ -47,13 +47,13 @@ impl ScrollCaptureState {
     pub fn new(
         selection: CGRect,
         scale_factor: CGFloat,
-        screen_height: CGFloat,
+        screen_origin: CGPoint,
         display_id: u32,
     ) -> Self {
         ScrollCaptureState {
             selection,
             scale_factor,
-            screen_height,
+            screen_origin,
             max_steps: 50,
             settle_delay: 0.5,
             frames: Vec::new(),
@@ -94,12 +94,12 @@ impl ScrollCaptureState {
                     return false;
                 }
 
-                // Scroll down by the selection height (pixel scroll units)
+                // Scroll down by 2/3 of selection height — guarantees at least 1/3 overlap
                 let center_x = self.selection.origin.x + self.selection.size.width / 2.0;
                 let center_y = self.selection.origin.y + self.selection.size.height / 2.0;
                 let screen_point =
-                    crate::scroll::flipped_to_screen(center_x, center_y, self.screen_height);
-                let scroll_amount = -(self.selection.size.height as i32);
+                    crate::scroll::overlay_to_cg_global(center_x, center_y, self.screen_origin);
+                let scroll_amount = -(self.selection.size.height * 2.0 / 3.0) as i32;
                 crate::scroll::simulate_scroll(screen_point, scroll_amount);
 
                 self.phase = Phase::Capture;
@@ -117,14 +117,16 @@ impl ScrollCaptureState {
                     let frame_height = CGImage::height(Some(prev));
                     let overlap = estimate_overlap(prev, &frame, frame_height);
 
-                    if overlap >= frame_height {
-                        eprintln!("Scroll capture: content stopped scrolling (duplicate frame)");
+                    // 95%+ overlap means content didn't scroll — duplicate frame, stop without pushing
+                    if overlap >= frame_height * 19 / 20 {
+                        eprintln!("Scroll capture: content stopped scrolling (overlap={} / height={})", overlap, frame_height);
                         return false;
                     }
 
-                    if overlap > frame_height / 10 {
+                    // 80%+ overlap means near end of scrollable content — push frame and stop
+                    if overlap > frame_height * 4 / 5 {
                         eprintln!(
-                            "Scroll capture: partial scroll detected (overlap={} / height={}), stopping",
+                            "Scroll capture: near end of content (overlap={} / height={}), stopping",
                             overlap, frame_height
                         );
                         self.frames.push(frame);
@@ -173,8 +175,8 @@ fn estimate_overlap(prev: &CGImage, curr: &CGImage, frame_height: usize) -> usiz
         return 0;
     }
 
-    // Crop prev to just the bottom 13 rows
-    let strip_height = 13.min(frame_height);
+    // Crop prev to just the bottom 15 rows
+    let strip_height = 15.min(frame_height);
     let strip_start = frame_height - strip_height;
     let prev_crop_rect = CGRect::new(
         CGPoint::new(0.0, strip_start as CGFloat),
@@ -187,8 +189,8 @@ fn estimate_overlap(prev: &CGImage, curr: &CGImage, frame_height: usize) -> usiz
         return 0;
     };
 
-    // Crop curr to the top 80%
-    let search_height = frame_height * 4 / 5;
+    // Search the full curr image
+    let search_height = frame_height;
     let curr_crop_rect = CGRect::new(
         CGPoint::ZERO,
         CGSize::new(width as CGFloat, search_height as CGFloat),
@@ -202,14 +204,14 @@ fn estimate_overlap(prev: &CGImage, curr: &CGImage, frame_height: usize) -> usiz
 
     let bpr = width * 4;
 
-    // Reference strip: 3 rows starting 10 rows from the bottom of prev
+    // Reference strip: 5 rows starting 10 rows from the bottom of prev
     let ref_local_start = strip_height.saturating_sub(10);
-    let ref_count = 3.min(strip_height - ref_local_start);
+    let ref_count = 5.min(strip_height - ref_local_start);
     let dist_from_bottom = strip_height - ref_local_start;
 
     let search_limit = search_height.saturating_sub(ref_count);
 
-    for candidate in 0..search_limit {
+    for candidate in 0..=search_limit {
         let mut sad_sum: u64 = 0;
         let mut count: u64 = 0;
 
@@ -237,7 +239,7 @@ fn estimate_overlap(prev: &CGImage, curr: &CGImage, frame_height: usize) -> usiz
 
         if count > 0 {
             let avg = sad_sum as f64 / (count as f64 * 3.0);
-            if avg < 3.0 {
+            if avg < 5.0 {
                 return dist_from_bottom + candidate;
             }
         }
