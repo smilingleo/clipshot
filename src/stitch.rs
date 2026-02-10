@@ -111,55 +111,85 @@ pub fn stitch_frames(frames: &[CFRetained<CGImage>]) -> Option<CFRetained<CGImag
     CGBitmapContextCreateImage(Some(&ctx))
 }
 
-/// Fast overlap detection using a 3-phase approach:
-/// 1. Sparse probe: ~20 evenly-spaced candidates with heavy subsampling
-/// 2. Refine: search around the best probe with moderate subsampling
-/// 3. Verify: full-pixel check on the single best candidate
+/// Fast overlap detection using strip matching:
+///
+/// Instead of comparing variable-size overlap regions (which biases toward small K
+/// where fewer pixels make accidental matches likely), we take a fixed-size reference
+/// strip from frame A and slide it through frame B. The constant strip size ensures
+/// equal signal for all candidate positions, eliminating the small-K false match problem.
+///
+/// 1. Sparse probe: ~48 positions, 8x column subsampling
+/// 2. Refine: ±probe_step around the best, 2x column subsampling
+/// 3. Verify: full overlap region with moderate subsampling
 fn find_overlap_fast(
     data_a: &[u8],
     data_b: &[u8],
     width: usize,
     height: usize,
 ) -> usize {
-    if data_a.is_empty() || data_b.is_empty() || width == 0 || height == 0 {
+    if data_a.is_empty() || data_b.is_empty() || width == 0 || height < 32 {
         return 0;
     }
 
     let bpr = width * 4;
     let max_overlap = height * 19 / 20;
+    let margin = width / 20;
+    let col_start = margin;
+    let col_end = width.saturating_sub(margin);
+    if col_end <= col_start {
+        return 0;
+    }
 
-    // Phase 1: Sparse probe — ~48 evenly-spaced candidates with 16x subsample
-    let probe_step = (max_overlap / 48).max(1);
-    let mut best_k: usize = 0;
+    // Reference strip: 16 rows from the bottom sixth of frame A.
+    // Positioned to be roughly centered in the expected overlap region
+    // (we scroll 2/3 of height, so overlap ≈ 1/3 of height).
+    let strip_rows = 16.min(height / 4);
+    let strip_offset = height / 6; // distance from bottom of A to start of strip
+    let strip_a_start = height - strip_offset;
+
+    // With overlap of k rows, the strip appears at row (k - strip_offset) in B.
+    // Valid when k >= strip_offset. Max position = max_overlap - strip_offset - strip_rows.
+    let max_pos_b = max_overlap
+        .saturating_sub(strip_offset)
+        .saturating_sub(strip_rows);
+
+    if strip_rows < 4 || max_pos_b == 0 {
+        return 0;
+    }
+
+    // Phase 1: Sparse probe — ~48 positions with 8x column subsampling
+    let probe_step = (max_pos_b / 48).max(1);
+    let mut best_pos: usize = 0;
     let mut best_sad = f64::MAX;
 
-    let mut k = 1;
-    while k <= max_overlap {
-        let sad = compute_sad(data_a, data_b, bpr, width, height, k, 16);
+    let mut pos = 0;
+    while pos <= max_pos_b {
+        let sad = strip_sad(
+            data_a, data_b, bpr, col_start, col_end, strip_a_start, pos, strip_rows, 8,
+        );
         if sad < best_sad {
             best_sad = sad;
-            best_k = k;
+            best_pos = pos;
         }
-        k += probe_step;
+        pos += probe_step;
     }
 
     if best_sad > 30.0 {
         return 0;
     }
 
-    // Phase 2: Refine — search ±probe_step around the best with 4x subsample
-    let search_start = best_k.saturating_sub(probe_step);
-    let search_end = (best_k + probe_step).min(max_overlap);
+    // Phase 2: Refine — ±probe_step around best with 2x column subsampling
+    let lo = best_pos.saturating_sub(probe_step);
+    let hi = (best_pos + probe_step).min(max_pos_b);
     best_sad = f64::MAX;
 
-    for k in search_start..=search_end {
-        if k == 0 {
-            continue;
-        }
-        let sad = compute_sad(data_a, data_b, bpr, width, height, k, 4);
+    for pos in lo..=hi {
+        let sad = strip_sad(
+            data_a, data_b, bpr, col_start, col_end, strip_a_start, pos, strip_rows, 2,
+        );
         if sad < best_sad {
             best_sad = sad;
-            best_k = k;
+            best_pos = pos;
         }
     }
 
@@ -167,23 +197,68 @@ fn find_overlap_fast(
         return 0;
     }
 
-    // Phase 3: Verify the best candidate with full pixels (subsample=1)
-    let final_sad = compute_sad(data_a, data_b, bpr, width, height, best_k, 1);
+    let overlap = best_pos + strip_offset;
 
-    if final_sad > 20.0 {
+    // Phase 3: Verify — check the full overlap region with moderate subsampling
+    let verify_sad = compute_sad(data_a, data_b, bpr, width, height, overlap, 4);
+
+    if verify_sad > 20.0 {
         eprintln!(
             "No reliable overlap (verified SAD={:.1} at {} rows)",
-            final_sad, best_k
+            verify_sad, overlap
         );
         return 0;
     }
 
-    if best_k >= height {
+    if overlap >= height {
         return height;
     }
 
-    eprintln!("Overlap: {} rows (SAD={:.2})", best_k, final_sad);
-    best_k
+    eprintln!("Overlap: {} rows (SAD={:.2})", overlap, verify_sad);
+    overlap
+}
+
+/// Compute average per-channel SAD between a strip of rows in A and a strip of rows in B.
+/// Only considers columns in `[col_start, col_end)` with the given step.
+#[inline]
+fn strip_sad(
+    data_a: &[u8],
+    data_b: &[u8],
+    bpr: usize,
+    col_start: usize,
+    col_end: usize,
+    a_start: usize,
+    b_start: usize,
+    rows: usize,
+    col_step: usize,
+) -> f64 {
+    let mut sad_sum: u64 = 0;
+    let mut count: u64 = 0;
+
+    for r in 0..rows {
+        let a_base = (a_start + r) * bpr;
+        let b_base = (b_start + r) * bpr;
+
+        let mut col = col_start;
+        while col < col_end {
+            let ap = a_base + col * 4;
+            let bp = b_base + col * 4;
+            if ap + 2 < data_a.len() && bp + 2 < data_b.len() {
+                sad_sum += (data_a[ap] as i32 - data_b[bp] as i32).unsigned_abs() as u64;
+                sad_sum +=
+                    (data_a[ap + 1] as i32 - data_b[bp + 1] as i32).unsigned_abs() as u64;
+                sad_sum +=
+                    (data_a[ap + 2] as i32 - data_b[bp + 2] as i32).unsigned_abs() as u64;
+                count += 1;
+            }
+            col += col_step;
+        }
+    }
+
+    if count == 0 {
+        return f64::MAX;
+    }
+    sad_sum as f64 / (count as f64 * 3.0)
 }
 
 /// Compute average per-channel SAD between bottom K rows of A and top K rows of B.
