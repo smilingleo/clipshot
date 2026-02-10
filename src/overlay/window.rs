@@ -66,8 +66,7 @@ impl OverlayWindow {
         OverlayWindow { window, view }
     }
 
-    pub fn show_with_screenshot(&self, cg_image: &CGImage, mtm: MainThreadMarker) {
-        let screen = NSScreen::mainScreen(mtm).expect("no main screen");
+    pub fn show_with_screenshot(&self, cg_image: &CGImage, screen: &NSScreen, mtm: MainThreadMarker) {
         let frame = screen.frame();
         let scale_factor = screen.backingScaleFactor();
 

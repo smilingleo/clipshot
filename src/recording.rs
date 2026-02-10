@@ -15,6 +15,8 @@ pub struct RecordingState {
     pub output_path: Option<PathBuf>,
     /// Window ID of the border overlay to exclude from screen capture.
     pub exclude_window_id: Option<u32>,
+    /// The display ID to capture frames from (locked at recording start).
+    pub display_id: u32,
 }
 
 impl RecordingState {
@@ -22,6 +24,7 @@ impl RecordingState {
         encoder: VideoEncoder,
         selection_rect: CGRect,
         scale_factor: CGFloat,
+        display_id: u32,
     ) -> Self {
         RecordingState {
             encoder,
@@ -30,13 +33,15 @@ impl RecordingState {
             timer: None,
             output_path: None,
             exclude_window_id: None,
+            display_id,
         }
     }
 
-    /// Capture one frame: grab full screen, crop to selection, feed to encoder.
+    /// Capture one frame: grab the target display, crop to selection, feed to encoder.
     pub fn capture_frame(&mut self) {
         let full_image =
-            match crate::capture::capture_full_screen_excluding(self.exclude_window_id) {
+            match crate::capture::capture_display_excluding(self.display_id, self.exclude_window_id)
+            {
                 Some(img) => img,
                 None => return,
             };

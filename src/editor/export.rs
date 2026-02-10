@@ -67,7 +67,7 @@ pub fn export_with_annotations(
 }
 
 /// Draw annotations onto a source frame, producing a new CGImage.
-fn composite_frame(
+pub(crate) fn composite_frame(
     source: &CGImage,
     annotations: &[&crate::annotation::model::Annotation],
     width: usize,
@@ -102,7 +102,7 @@ fn composite_frame(
     CGContext::scale_ctm(Some(&ctx), 1.0, -1.0);
 
     for ann in annotations {
-        crate::annotation::renderer::draw_annotation(&ctx, ann);
+        crate::annotation::renderer::draw_annotation(&ctx, ann, Some(source));
     }
 
     CGBitmapContextCreateImage(Some(&ctx))

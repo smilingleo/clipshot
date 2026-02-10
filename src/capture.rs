@@ -1,26 +1,27 @@
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::{
-    CGDisplayBounds, CGImage, CGMainDisplayID, CGWindowID, CGWindowImageOption,
-    CGWindowListOption,
+    CGDirectDisplayID, CGDisplayBounds, CGImage, CGMainDisplayID, CGWindowID,
+    CGWindowImageOption, CGWindowListOption,
 };
 #[allow(deprecated)]
 use objc2_core_graphics::CGWindowListCreateImage;
 
-/// Capture the main display as a CGImage.
+/// Capture the display under the mouse cursor as a CGImage.
 /// Returns None if screen recording permission is not granted or capture fails.
-#[allow(deprecated)] // CGWindowListCreateImage deprecated in favor of ScreenCaptureKit
+#[allow(deprecated)]
 pub fn capture_full_screen() -> Option<CFRetained<CGImage>> {
-    capture_full_screen_excluding(None)
+    let display_id = crate::screen::display_with_mouse();
+    capture_display_excluding(display_id, None)
 }
 
-/// Capture the main display, optionally excluding a specific window by its ID.
+/// Capture a specific display, optionally excluding a specific window by its ID.
 /// When `exclude_window_id` is Some, captures everything on screen below that window,
 /// effectively excluding it from the capture.
 #[allow(deprecated)]
-pub fn capture_full_screen_excluding(
+pub fn capture_display_excluding(
+    display_id: CGDirectDisplayID,
     exclude_window_id: Option<u32>,
 ) -> Option<CFRetained<CGImage>> {
-    let display_id = CGMainDisplayID();
     let bounds = CGDisplayBounds(display_id);
 
     let (list_option, window_id) = match exclude_window_id {

@@ -2,7 +2,7 @@ use objc2::define_class;
 use objc2::rc::Retained;
 use objc2::{msg_send, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSGraphicsContext, NSScreen, NSView, NSWindow,
+    NSBackingStoreType, NSColor, NSGraphicsContext, NSView, NSWindow,
     NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
@@ -101,20 +101,20 @@ impl RecordingBorder {
         RecordingBorder { window }
     }
 
-    /// Show the border around the given selection rect (in screen logical points).
+    /// Show the border around the given selection rect (in overlay local coordinates).
     /// The rect uses top-left origin (flipped coordinates from the overlay view).
-    pub fn show(&self, selection: CGRect, mtm: MainThreadMarker) {
-        // macOS window coordinates use bottom-left origin.
-        // Convert from top-left (overlay) to bottom-left (screen).
-        let screen = NSScreen::mainScreen(mtm).expect("no main screen");
-        let screen_h = screen.frame().size.height;
+    /// `screen_frame` is the overlay's screen frame in global AppKit coordinates.
+    pub fn show(&self, selection: CGRect, screen_frame: CGRect) {
+        // macOS window coordinates use bottom-left origin in global coords.
+        // Convert from overlay-local flipped coords to global screen coords.
 
         // Add a small margin so the border is drawn just outside the selection
         let margin: CGFloat = 1.0;
         let window_frame = CGRect::new(
             CGPoint::new(
-                selection.origin.x - margin,
-                screen_h - selection.origin.y - selection.size.height - margin,
+                screen_frame.origin.x + selection.origin.x - margin,
+                screen_frame.origin.y + screen_frame.size.height
+                    - selection.origin.y - selection.size.height - margin,
             ),
             CGSize::new(
                 selection.size.width + margin * 2.0,

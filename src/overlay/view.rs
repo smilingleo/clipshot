@@ -10,7 +10,7 @@ use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGContext;
 use objc2_foundation::{MainThreadMarker, NSRect, NSString};
 
-use crate::annotation::model::Annotation;
+use crate::annotation::model::{Annotation, HandleKind};
 
 /// Tracks which part of the selection the user is interacting with.
 #[derive(Clone, Copy, PartialEq)]
@@ -37,6 +37,18 @@ pub enum ActiveTool {
     Ellipse,
     Pencil,
     Text,
+    Highlight,
+    Step,
+    Blur,
+    Crop,
+}
+
+/// Tracks what the Select tool is currently dragging.
+#[derive(Clone, Copy, PartialEq)]
+pub enum SelectDragMode {
+    None,
+    MovingAnnotation,
+    ResizingHandle(HandleKind),
 }
 
 pub struct OverlayViewIvars {
@@ -57,6 +69,18 @@ pub struct OverlayViewIvars {
     pub text_position: Cell<CGPoint>,
     /// Index of the currently selected annotation (for highlight + delete).
     pub active_annotation_index: Cell<Option<usize>>,
+    /// What the Select tool is currently dragging.
+    pub select_drag_mode: Cell<SelectDragMode>,
+    /// Mouse position at the start of a select drag.
+    pub select_drag_start: Cell<CGPoint>,
+    /// Current stroke width for annotations.
+    pub annotation_width: Cell<CGFloat>,
+    /// Current font size for text annotations.
+    pub annotation_font_size: Cell<CGFloat>,
+    /// Next step number for the Step tool.
+    pub next_step_number: Cell<u32>,
+    /// Redo stack for undone annotations.
+    pub redo_stack: RefCell<Vec<Annotation>>,
 }
 
 define_class!(
@@ -133,13 +157,14 @@ define_class!(
                 CGContext::clip_to_rect(Some(&cg), norm);
                 let active_idx = self.ivars().active_annotation_index.get();
                 for (i, ann) in self.ivars().annotations.borrow().iter().enumerate() {
-                    crate::annotation::renderer::draw_annotation(&cg, ann);
+                    crate::annotation::renderer::draw_annotation(&cg, ann, None);
                     if active_idx == Some(i) {
                         draw_annotation_highlight(&cg, ann);
+                        draw_annotation_handles(&cg, ann);
                     }
                 }
                 if let Some(ref ann) = *self.ivars().current_annotation.borrow() {
-                    crate::annotation::renderer::draw_annotation(&cg, ann);
+                    crate::annotation::renderer::draw_annotation(&cg, ann, None);
                 }
                 CGContext::restore_g_state(Some(&cg));
 
@@ -172,10 +197,24 @@ define_class!(
 
             let active_tool = self.ivars().active_tool.get();
 
-            // Select tool with existing selection: annotation select/deselect only
+            // Select tool with existing selection: handle resize, move, or select/deselect
             if active_tool == ActiveTool::Select {
                 if self.ivars().selection.get().is_some() {
                     let annotations = self.ivars().annotations.borrow();
+
+                    // 1. Check if clicking on a handle of the currently selected annotation
+                    if let Some(idx) = self.ivars().active_annotation_index.get() {
+                        if let Some(ann) = annotations.get(idx) {
+                            if let Some(handle) = ann.hit_test_handle(point) {
+                                drop(annotations);
+                                self.ivars().select_drag_mode.set(SelectDragMode::ResizingHandle(handle));
+                                self.ivars().select_drag_start.set(point);
+                                return;
+                            }
+                        }
+                    }
+
+                    // 2. Check if clicking on any annotation body
                     let mut hit_idx = None;
                     for (i, ann) in annotations.iter().enumerate().rev() {
                         if ann.hit_test(point) {
@@ -184,7 +223,39 @@ define_class!(
                         }
                     }
                     drop(annotations);
-                    self.ivars().active_annotation_index.set(hit_idx);
+
+                    if let Some(idx) = hit_idx {
+                        // Double-click on Text annotation: re-edit it
+                        if event.clickCount() >= 2 {
+                            let annotations = self.ivars().annotations.borrow();
+                            if let Some(ann) = annotations.get(idx) {
+                                if let Annotation::Text { position, text, color, font_size } = ann {
+                                    let pos = *position;
+                                    let txt = text.clone();
+                                    let clr = *color;
+                                    let fs = *font_size;
+                                    drop(annotations);
+                                    // Remove the annotation
+                                    self.ivars().annotations.borrow_mut().remove(idx);
+                                    self.ivars().active_annotation_index.set(None);
+                                    // Show text field pre-filled
+                                    self.ivars().annotation_color.set(clr);
+                                    self.ivars().annotation_font_size.set(fs);
+                                    self.show_text_field_with_text(pos, &txt, fs);
+                                    self.setNeedsDisplay(true);
+                                    return;
+                                }
+                            }
+                            drop(annotations);
+                        }
+                        self.ivars().active_annotation_index.set(Some(idx));
+                        self.ivars().select_drag_mode.set(SelectDragMode::MovingAnnotation);
+                        self.ivars().select_drag_start.set(point);
+                    } else {
+                        // Clicked empty space — deselect
+                        self.ivars().active_annotation_index.set(None);
+                        self.ivars().select_drag_mode.set(SelectDragMode::None);
+                    }
                     self.setNeedsDisplay(true);
                     return;
                 }
@@ -227,6 +298,41 @@ define_class!(
             let start = self.ivars().drag_start.get();
 
             let active_tool = self.ivars().active_tool.get();
+
+            // Handle Select tool drag (move or resize annotation)
+            if active_tool == ActiveTool::Select {
+                let drag_mode = self.ivars().select_drag_mode.get();
+                match drag_mode {
+                    SelectDragMode::MovingAnnotation => {
+                        if let Some(idx) = self.ivars().active_annotation_index.get() {
+                            let drag_start = self.ivars().select_drag_start.get();
+                            let dx = point.x - drag_start.x;
+                            let dy = point.y - drag_start.y;
+                            let mut annotations = self.ivars().annotations.borrow_mut();
+                            if let Some(ann) = annotations.get_mut(idx) {
+                                ann.translate(dx, dy);
+                            }
+                            drop(annotations);
+                            self.ivars().select_drag_start.set(point);
+                            self.setNeedsDisplay(true);
+                        }
+                        return;
+                    }
+                    SelectDragMode::ResizingHandle(handle) => {
+                        if let Some(idx) = self.ivars().active_annotation_index.get() {
+                            let mut annotations = self.ivars().annotations.borrow_mut();
+                            if let Some(ann) = annotations.get_mut(idx) {
+                                ann.apply_resize(handle, point);
+                            }
+                            drop(annotations);
+                            self.setNeedsDisplay(true);
+                        }
+                        return;
+                    }
+                    SelectDragMode::None => {}
+                }
+            }
+
             if active_tool != ActiveTool::Select {
                 if let Some(ref mut ann) = *self.ivars().current_annotation.borrow_mut() {
                     crate::annotation::model::update_annotation(ann, point);
@@ -268,8 +374,15 @@ define_class!(
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, _event: &NSEvent) {
             let active_tool = self.ivars().active_tool.get();
+
+            // Reset select drag mode
+            if active_tool == ActiveTool::Select {
+                self.ivars().select_drag_mode.set(SelectDragMode::None);
+            }
+
             if active_tool != ActiveTool::Select {
                 if let Some(ann) = self.ivars().current_annotation.borrow_mut().take() {
+                    self.ivars().redo_stack.borrow_mut().clear();
                     self.ivars().annotations.borrow_mut().push(ann);
                     self.setNeedsDisplay(true);
                 }
@@ -289,6 +402,26 @@ define_class!(
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
             let key_code = event.keyCode();
+            let flags = event.modifierFlags();
+            let has_modifiers = flags.contains(objc2_app_kit::NSEventModifierFlags::Command)
+                || flags.contains(objc2_app_kit::NSEventModifierFlags::Control)
+                || flags.contains(objc2_app_kit::NSEventModifierFlags::Option);
+
+            // Tool shortcuts (only when no text field active and no modifiers)
+            if !has_modifiers && self.ivars().text_field.borrow().is_none() {
+                if let Some(tool) = tool_for_key(key_code) {
+                    self.commit_text_field();
+                    self.ivars().active_tool.set(tool);
+                    self.notify_tool_changed();
+                    return;
+                }
+                // Stroke width shortcuts: 1=thin, 2=medium, 3=thick
+                if let Some((sel_name, _)) = stroke_for_key(key_code) {
+                    self.notify_stroke_changed(sel_name);
+                    return;
+                }
+            }
+
             // Escape = 53
             if key_code == 53 {
                 self.dismiss();
@@ -309,12 +442,25 @@ define_class!(
                 }
             }
 
+            // Cmd+Shift+Z = redo (keyCode 6 = Z with Shift)
+            if key_code == 6
+                && flags.contains(objc2_app_kit::NSEventModifierFlags::Command)
+                && flags.contains(objc2_app_kit::NSEventModifierFlags::Shift)
+            {
+                if let Some(ann) = self.ivars().redo_stack.borrow_mut().pop() {
+                    self.ivars().annotations.borrow_mut().push(ann);
+                    self.setNeedsDisplay(true);
+                }
+                return;
+            }
+
             // Cmd+Z = undo (keyCode 6 = Z)
-            let flags = event.modifierFlags();
             if key_code == 6
                 && flags.contains(objc2_app_kit::NSEventModifierFlags::Command)
             {
-                self.ivars().annotations.borrow_mut().pop();
+                if let Some(ann) = self.ivars().annotations.borrow_mut().pop() {
+                    self.ivars().redo_stack.borrow_mut().push(ann);
+                }
                 self.setNeedsDisplay(true);
             }
         }
@@ -366,6 +512,12 @@ impl OverlayView {
             text_field: RefCell::new(None),
             text_position: Cell::new(CGPoint::ZERO),
             active_annotation_index: Cell::new(None),
+            select_drag_mode: Cell::new(SelectDragMode::None),
+            select_drag_start: Cell::new(CGPoint::ZERO),
+            annotation_width: Cell::new(3.0),
+            annotation_font_size: Cell::new(18.0),
+            next_step_number: Cell::new(1),
+            redo_stack: RefCell::new(Vec::new()),
         });
         let view: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         view
@@ -384,6 +536,7 @@ impl OverlayView {
         self.ivars().annotations.borrow_mut().clear();
         *self.ivars().current_annotation.borrow_mut() = None;
         self.ivars().active_annotation_index.set(None);
+        self.ivars().select_drag_mode.set(SelectDragMode::None);
         self.commit_text_field();
         self.setNeedsDisplay(true);
     }
@@ -469,53 +622,84 @@ impl OverlayView {
     fn start_annotation(&self, point: CGPoint) {
         let color = self.ivars().annotation_color.get();
         let tool = self.ivars().active_tool.get();
+        let width = self.ivars().annotation_width.get();
 
         let ann = match tool {
             ActiveTool::Arrow => Annotation::Arrow {
                 start: point,
                 end: point,
                 color,
-                width: 2.0,
+                width,
             },
             ActiveTool::Rectangle => Annotation::Rect {
                 origin: point,
                 size: CGSize::ZERO,
                 color,
-                width: 2.0,
+                width,
             },
             ActiveTool::Ellipse => Annotation::Ellipse {
                 origin: point,
                 size: CGSize::ZERO,
                 color,
-                width: 2.0,
+                width,
             },
             ActiveTool::Pencil => Annotation::Pencil {
                 points: vec![point],
                 color,
-                width: 2.0,
+                width,
             },
+            ActiveTool::Highlight => Annotation::Highlight {
+                origin: point,
+                size: CGSize::ZERO,
+                color,
+                opacity: 0.35,
+            },
+            ActiveTool::Blur => Annotation::Blur {
+                origin: point,
+                size: CGSize::ZERO,
+                block_size: 10,
+            },
+            ActiveTool::Step => {
+                let number = self.ivars().next_step_number.get();
+                self.ivars().next_step_number.set(number + 1);
+                let ann = Annotation::Step {
+                    center: point,
+                    number,
+                    color,
+                    radius: 14.0,
+                };
+                self.ivars().redo_stack.borrow_mut().clear();
+                self.ivars().annotations.borrow_mut().push(ann);
+                self.setNeedsDisplay(true);
+                return;
+            }
             ActiveTool::Text => {
                 self.show_text_field(point);
                 return;
             }
-            ActiveTool::Select => return,
+            ActiveTool::Select | ActiveTool::Crop => return,
         };
 
         *self.ivars().current_annotation.borrow_mut() = Some(ann);
     }
 
     fn show_text_field(&self, point: CGPoint) {
+        self.show_text_field_with_text(point, "", self.ivars().annotation_font_size.get());
+    }
+
+    fn show_text_field_with_text(&self, point: CGPoint, initial_text: &str, font_size: CGFloat) {
         // Commit any existing text field first
         self.commit_text_field();
 
         let mtm = MainThreadMarker::from(self);
-        let frame = NSRect::new(point, CGSize::new(200.0, 24.0));
+        let field_height = font_size * 1.5;
+        let frame = NSRect::new(point, CGSize::new(200.0, field_height));
         let field = NSTextField::new(mtm);
         field.setFrame(frame);
-        field.setFont(Some(&NSFont::systemFontOfSize(16.0)));
+        field.setFont(Some(&NSFont::systemFontOfSize(font_size)));
         field.setDrawsBackground(true);
         field.setBordered(true);
-        field.setStringValue(&NSString::from_str(""));
+        field.setStringValue(&NSString::from_str(initial_text));
 
         self.addSubview(&field);
         if let Some(w) = self.window() {
@@ -534,11 +718,13 @@ impl OverlayView {
             if !text.is_empty() {
                 let color = self.ivars().annotation_color.get();
                 let position = self.ivars().text_position.get();
+                let font_size = self.ivars().annotation_font_size.get();
+                self.ivars().redo_stack.borrow_mut().clear();
                 self.ivars().annotations.borrow_mut().push(Annotation::Text {
                     position,
                     text,
                     color,
-                    font_size: 16.0,
+                    font_size,
                 });
             }
             field.removeFromSuperview();
@@ -562,6 +748,44 @@ impl OverlayView {
         let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
         if let Some(delegate) = app.delegate() {
             let _: () = unsafe { objc2::msg_send![&*delegate, selectionChanged: self] };
+        }
+    }
+
+    /// Notify the app delegate that the tool changed (from keyboard shortcut),
+    /// so the toolbar visual state can be updated.
+    fn notify_tool_changed(&self) {
+        let tool = self.ivars().active_tool.get();
+        let mtm = MainThreadMarker::from(self);
+        let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+        if let Some(delegate) = app.delegate() {
+            let d = &*delegate;
+            match tool {
+                ActiveTool::Select => { let _: () = unsafe { objc2::msg_send![d, toolSelect: self] }; }
+                ActiveTool::Arrow => { let _: () = unsafe { objc2::msg_send![d, toolArrow: self] }; }
+                ActiveTool::Rectangle => { let _: () = unsafe { objc2::msg_send![d, toolRect: self] }; }
+                ActiveTool::Ellipse => { let _: () = unsafe { objc2::msg_send![d, toolEllipse: self] }; }
+                ActiveTool::Pencil => { let _: () = unsafe { objc2::msg_send![d, toolPencil: self] }; }
+                ActiveTool::Text => { let _: () = unsafe { objc2::msg_send![d, toolText: self] }; }
+                ActiveTool::Highlight => { let _: () = unsafe { objc2::msg_send![d, toolHighlight: self] }; }
+                ActiveTool::Step => { let _: () = unsafe { objc2::msg_send![d, toolStep: self] }; }
+                ActiveTool::Blur => { let _: () = unsafe { objc2::msg_send![d, toolBlur: self] }; }
+                ActiveTool::Crop => { let _: () = unsafe { objc2::msg_send![d, toolCrop: self] }; }
+            }
+        }
+    }
+
+    /// Notify the app delegate that the stroke width changed (from keyboard shortcut).
+    fn notify_stroke_changed(&self, sel_name: &str) {
+        let mtm = MainThreadMarker::from(self);
+        let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+        if let Some(delegate) = app.delegate() {
+            let d = &*delegate;
+            match sel_name {
+                "strokeThin:" => { let _: () = unsafe { objc2::msg_send![d, strokeThin: self] }; }
+                "strokeMedium:" => { let _: () = unsafe { objc2::msg_send![d, strokeMedium: self] }; }
+                "strokeThick:" => { let _: () = unsafe { objc2::msg_send![d, strokeThick: self] }; }
+                _ => {}
+            }
         }
     }
 }
@@ -605,6 +829,35 @@ fn resize_rect(orig: CGRect, mode: DragMode, start: CGPoint, current: CGPoint) -
     CGRect::new(CGPoint::new(nx, ny), CGSize::new(nw, nh))
 }
 
+/// Draw resize handles on a selected annotation.
+fn draw_annotation_handles(ctx: &CGContext, ann: &Annotation) {
+    let handles = ann.resize_handles();
+    if handles.is_empty() {
+        return;
+    }
+
+    let handle_size: CGFloat = 6.0;
+    let hs = handle_size / 2.0;
+
+    CGContext::save_g_state(Some(ctx));
+    CGContext::set_rgb_fill_color(Some(ctx), 1.0, 1.0, 1.0, 1.0);
+    CGContext::set_rgb_stroke_color(Some(ctx), 0.2, 0.5, 1.0, 1.0);
+    CGContext::set_line_width(Some(ctx), 1.0);
+    // Solid line for handles
+    unsafe { CGContext::set_line_dash(Some(ctx), 0.0, std::ptr::null(), 0) };
+
+    for (_kind, point) in handles {
+        let handle_rect = CGRect::new(
+            CGPoint::new(point.x - hs, point.y - hs),
+            CGSize::new(handle_size, handle_size),
+        );
+        CGContext::fill_rect(Some(ctx), handle_rect);
+        CGContext::stroke_rect(Some(ctx), handle_rect);
+    }
+
+    CGContext::restore_g_state(Some(ctx));
+}
+
 /// Draw a dashed highlight border around a selected annotation.
 fn draw_annotation_highlight(ctx: &CGContext, ann: &Annotation) {
     let rect = ann.bounding_rect();
@@ -622,4 +875,32 @@ fn draw_annotation_highlight(ctx: &CGContext, ann: &Annotation) {
     }
     CGContext::stroke_rect(Some(ctx), highlight);
     CGContext::restore_g_state(Some(ctx));
+}
+
+/// Map a macOS keyCode to an ActiveTool (for keyboard shortcuts).
+pub fn tool_for_key(key_code: u16) -> Option<ActiveTool> {
+    match key_code {
+        1 => Some(ActiveTool::Select),     // S
+        0 => Some(ActiveTool::Arrow),      // A
+        15 => Some(ActiveTool::Rectangle), // R
+        14 => Some(ActiveTool::Ellipse),   // E
+        35 => Some(ActiveTool::Pencil),    // P
+        17 => Some(ActiveTool::Text),      // T
+        4 => Some(ActiveTool::Highlight),  // H
+        45 => Some(ActiveTool::Step),     // N
+        11 => Some(ActiveTool::Blur),     // B
+        8 => Some(ActiveTool::Crop),      // C
+        _ => None,
+    }
+}
+
+/// Map a macOS keyCode to a stroke action selector name and index.
+/// Returns (selector_name, index) for 1=thin, 2=medium, 3=thick.
+pub fn stroke_for_key(key_code: u16) -> Option<(&'static str, usize)> {
+    match key_code {
+        18 => Some(("strokeThin:", 0)),   // 1
+        19 => Some(("strokeMedium:", 1)), // 2
+        20 => Some(("strokeThick:", 2)),  // 3
+        _ => None,
+    }
 }

@@ -23,6 +23,8 @@ pub struct EditorState {
     pub annotations: Vec<TimedAnnotation>,
     /// Index into annotations for the annotation currently being edited.
     pub active_annotation: Option<usize>,
+    /// Redo stack for undone annotations.
+    pub redo_stack: Vec<TimedAnnotation>,
 }
 
 impl EditorState {
@@ -35,6 +37,7 @@ impl EditorState {
             is_playing: false,
             annotations: Vec::new(),
             active_annotation: None,
+            redo_stack: Vec::new(),
         }
     }
 
@@ -45,6 +48,7 @@ impl EditorState {
 
     /// Add an annotation at the given frame. Sets it as active and returns its index.
     pub fn add_annotation(&mut self, annotation: Annotation, frame: usize) -> usize {
+        self.redo_stack.clear();
         let timed = TimedAnnotation {
             annotation,
             start_frame: frame,
@@ -57,13 +61,26 @@ impl EditorState {
     }
 
     /// Remove the active annotation, or pop the last annotation if none is active.
+    /// Pushes the removed annotation to the redo stack.
     pub fn undo_annotation(&mut self) {
         if let Some(idx) = self.active_annotation.take() {
             if idx < self.annotations.len() {
-                self.annotations.remove(idx);
+                let removed = self.annotations.remove(idx);
+                self.redo_stack.push(removed);
             }
-        } else if !self.annotations.is_empty() {
-            self.annotations.pop();
+        } else if let Some(ann) = self.annotations.pop() {
+            self.redo_stack.push(ann);
+        }
+    }
+
+    /// Redo the last undone annotation. Returns true if an annotation was restored.
+    pub fn redo_annotation(&mut self) -> bool {
+        if let Some(ann) = self.redo_stack.pop() {
+            self.annotations.push(ann);
+            self.active_annotation = Some(self.annotations.len() - 1);
+            true
+        } else {
+            false
         }
     }
 

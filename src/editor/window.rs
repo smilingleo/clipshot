@@ -30,21 +30,34 @@ pub struct EditorWindow {
     pub timer: RefCell<Option<Retained<NSTimer>>>,
     /// True when playing in reverse direction.
     pub reversing: Cell<bool>,
+    /// True for single-frame images (screenshots), false for video recordings.
+    pub is_single_frame: bool,
 }
 
 impl EditorWindow {
     /// Open the editor with a recorded video file.
     pub fn open(video_path: &Path, mtm: MainThreadMarker) -> Result<Self, String> {
         let decoder = VideoDecoder::open(video_path)?;
+        Self::open_with_decoder(decoder, "Edit Recording", video_path, mtm)
+    }
 
+    /// Open the editor with an already-constructed decoder.
+    pub fn open_with_decoder(
+        decoder: VideoDecoder,
+        title: &str,
+        source_path: &Path,
+        mtm: MainThreadMarker,
+    ) -> Result<Self, String> {
         let dec_width = decoder.width();
         let dec_height = decoder.height();
         let total_frames = decoder.total_frames();
         let fps = decoder.fps();
 
         if total_frames == 0 {
-            return Err("Video has no frames".to_string());
+            return Err("No frames to display".to_string());
         }
+
+        let is_single_frame = total_frames == 1;
 
         // Scale up if video height is less than 800px
         const MIN_HEIGHT: CGFloat = 800.0;
@@ -57,12 +70,24 @@ impl EditorWindow {
             (native_w, native_h)
         };
 
-        // Window: video + progress slider
+        // For single-frame (stitched image) mode, cap height at screen height - 100
+        let screen = crate::screen::screen_with_mouse(mtm);
+        let screen_height = screen.frame().size.height;
+        let max_view_h = screen_height - 100.0;
+        let (view_w, view_h) = if is_single_frame && view_h > max_view_h {
+            let scale = max_view_h / view_h;
+            ((view_w * scale).round(), max_view_h)
+        } else {
+            (view_w, view_h)
+        };
+
+        // Window: video + progress slider (slider hidden in single-frame mode)
+        let progress_height = if is_single_frame { 0.0 } else { PROGRESS_BAR_HEIGHT };
         let window_w = view_w;
-        let window_h = view_h + PROGRESS_BAR_HEIGHT;
+        let window_h = view_h + progress_height;
 
         let state = EditorState::new(
-            video_path.to_path_buf(),
+            source_path.to_path_buf(),
             total_frames,
             fps,
         );
@@ -81,7 +106,7 @@ impl EditorWindow {
                 false,
             )
         };
-        window.setTitle(&NSString::from_str("Edit Recording"));
+        window.setTitle(&NSString::from_str(title));
         window.center();
 
         // Non-flipped layout (origin bottom-left):
@@ -90,7 +115,7 @@ impl EditorWindow {
 
         // Create the editor view (video area)
         let view_frame = NSRect::new(
-            CGPoint::new(0.0, PROGRESS_BAR_HEIGHT),
+            CGPoint::new(0.0, progress_height),
             CGSize::new(view_w, view_h),
         );
         let view = EditorView::new(mtm, view_frame);
@@ -113,6 +138,11 @@ impl EditorWindow {
             slider.setTarget(None);
         }
 
+        // Hide slider in single-frame mode
+        if is_single_frame {
+            slider.setHidden(true);
+        }
+
         // Create the floating mini bar (starts hidden, is a subview of the editor view)
         let minibar_frame = NSRect::new(
             CGPoint::ZERO,
@@ -125,7 +155,9 @@ impl EditorWindow {
         // Add views to the window's content view
         if let Some(content_view) = window.contentView() {
             content_view.addSubview(&view);
-            content_view.addSubview(&slider);
+            if !is_single_frame {
+                content_view.addSubview(&slider);
+            }
         }
 
         let editor = EditorWindow {
@@ -137,6 +169,7 @@ impl EditorWindow {
             decoder,
             timer: RefCell::new(None),
             reversing: Cell::new(false),
+            is_single_frame,
         };
 
         // Display the first frame
@@ -182,7 +215,7 @@ impl EditorWindow {
         // Update active annotation highlight on the view
         self.view.set_active_annotation_index(state.active_annotation);
 
-        self.view.display_frame(ns_image, visible);
+        self.view.display_frame(ns_image, cg_image, visible);
 
         // Update slider position
         self.slider.setDoubleValue(frame_idx as f64);
@@ -351,6 +384,14 @@ impl EditorWindow {
         self.display_current_frame(mtm);
     }
 
+    /// Redo the last undone annotation.
+    pub fn redo_annotation(&self, mtm: MainThreadMarker) {
+        if self.state.borrow_mut().redo_annotation() {
+            self.show_mini_bar(mtm);
+            self.display_current_frame(mtm);
+        }
+    }
+
     /// Confirm the active annotation's end frame at the current position.
     pub fn confirm_active_annotation(&self, mtm: MainThreadMarker) {
         let frame = self.state.borrow().current_frame;
@@ -387,7 +428,11 @@ impl EditorWindow {
     }
 
     /// Show the mini bar positioned under the active annotation.
+    /// Skipped for single-frame images (no timeline to edit).
     fn show_mini_bar(&self, _mtm: MainThreadMarker) {
+        if self.is_single_frame {
+            return;
+        }
         let state = self.state.borrow();
         if let Some(range) = state.active_annotation_range() {
             self.minibar_view.update_state(

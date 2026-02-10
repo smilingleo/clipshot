@@ -65,7 +65,7 @@ pub fn crop_and_composite(
     CGContext::translate_ctm(Some(&ctx), 0.0, -selection.origin.y);
 
     for ann in annotations {
-        crate::annotation::renderer::draw_annotation(&ctx, ann);
+        crate::annotation::renderer::draw_annotation(&ctx, ann, Some(&cropped));
     }
 
     CGBitmapContextCreateImage(Some(&ctx))
@@ -130,7 +130,7 @@ pub fn save_to_file(image: &CGImage, mtm: MainThreadMarker) {
 }
 
 /// Convert a CGImage to an RGBA byte buffer.
-fn cgimage_to_rgba(image: &CGImage) -> Result<Vec<u8>, String> {
+pub(crate) fn cgimage_to_rgba(image: &CGImage) -> Result<Vec<u8>, String> {
     let width = CGImage::width(Some(image));
     let height = CGImage::height(Some(image));
     let bytes_per_row = width * 4;

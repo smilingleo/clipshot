@@ -5,6 +5,7 @@ pub struct HotkeyManager {
     _manager: GlobalHotKeyManager,
     pub capture_hotkey_id: u32,
     pub record_hotkey_id: u32,
+    pub scroll_capture_hotkey_id: u32,
 }
 
 impl HotkeyManager {
@@ -29,16 +30,27 @@ impl HotkeyManager {
             .register(record_hotkey)
             .expect("failed to register record hotkey");
 
+        // Register Ctrl+Cmd+S for scrolling capture
+        let scroll_capture_hotkey = HotKey::new(
+            Some(Modifiers::CONTROL | Modifiers::META),
+            Code::KeyS,
+        );
+        manager
+            .register(scroll_capture_hotkey)
+            .expect("failed to register scroll capture hotkey");
+
         eprintln!(
-            "Global hotkeys registered: Ctrl+Cmd+A (id={}), Ctrl+Cmd+V (id={})",
+            "Global hotkeys registered: Ctrl+Cmd+A (id={}), Ctrl+Cmd+V (id={}), Ctrl+Cmd+S (id={})",
             capture_hotkey.id(),
-            record_hotkey.id()
+            record_hotkey.id(),
+            scroll_capture_hotkey.id(),
         );
 
         HotkeyManager {
             _manager: manager,
             capture_hotkey_id: capture_hotkey.id(),
             record_hotkey_id: record_hotkey.id(),
+            scroll_capture_hotkey_id: scroll_capture_hotkey.id(),
         }
     }
 }

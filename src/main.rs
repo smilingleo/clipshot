@@ -10,6 +10,10 @@ mod border;
 mod editor;
 mod encoder;
 mod recording;
+mod screen;
+mod scroll;
+mod scroll_capture;
+mod stitch;
 
 use objc2::runtime::ProtocolObject;
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate};

@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
-use objc2_app_kit::{NSApplicationDelegate, NSModalResponseOK, NSSavePanel};
-use objc2_core_foundation::CFRetained;
+use objc2_app_kit::{NSApplicationDelegate, NSColorPanel, NSModalResponseOK, NSSavePanel};
+use objc2_core_foundation::{CFRetained, CGFloat, CGPoint};
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSString, NSTimer,
@@ -17,6 +17,7 @@ use crate::hotkey::HotkeyManager;
 use crate::overlay::view::ActiveTool;
 use crate::overlay::OverlayWindow;
 use crate::recording::RecordingState;
+use crate::scroll_capture::ScrollCaptureState;
 use crate::statusbar::StatusBar;
 use crate::toolbar::ToolbarWindow;
 
@@ -35,6 +36,10 @@ pub struct AppDelegateIvars {
     recording_border: RefCell<Option<RecordingBorder>>,
     /// Post-recording video editor
     editor_window: RefCell<Option<EditorWindow>>,
+    /// True when the overlay is being used for scroll capture region selection
+    scroll_capture_mode: Cell<bool>,
+    /// Active scroll capture state (frames + timer)
+    scroll_capture_state: RefCell<Option<ScrollCaptureState>>,
 }
 
 define_class!(
@@ -78,7 +83,7 @@ define_class!(
                 );
             }
 
-            eprintln!("Screenshot app started. Ctrl+Cmd+A=capture, Ctrl+Cmd+V=record.");
+            eprintln!("Screenshot app started. Ctrl+Cmd+A=capture, Ctrl+Cmd+V=record, Ctrl+Cmd+S=scroll capture.");
         }
     }
 
@@ -93,7 +98,7 @@ define_class!(
                     let hk = hk.as_ref().unwrap();
 
                     if event.id() == hk.capture_hotkey_id {
-                        // Don't allow screenshot while recording or editing
+                        // Don't allow screenshot while recording, editing, or scroll capturing
                         if self.ivars().recording_state.borrow().is_some() {
                             eprintln!("Cannot capture screenshot while recording");
                             return;
@@ -102,17 +107,28 @@ define_class!(
                             eprintln!("Cannot capture screenshot while editing");
                             return;
                         }
+                        if self.ivars().scroll_capture_state.borrow().is_some() {
+                            eprintln!("Cannot capture screenshot while scroll capturing");
+                            return;
+                        }
                         eprintln!("Capture hotkey pressed");
                         self.do_capture();
                     } else if event.id() == hk.record_hotkey_id {
                         self.handle_record_hotkey();
+                    } else if event.id() == hk.scroll_capture_hotkey_id {
+                        // If already capturing, stop and stitch
+                        if self.ivars().scroll_capture_state.borrow().is_some() {
+                            self.stop_scroll_capture();
+                        } else {
+                            self.handle_scroll_capture_hotkey();
+                        }
                     }
                 }
             }
         }
     }
 
-    // --- Capture trigger ---
+    // --- Capture triggers (menu items) ---
     impl AppDelegate {
         #[unsafe(method(captureScreenshot:))]
         fn capture_screenshot(&self, _sender: &AnyObject) {
@@ -124,8 +140,22 @@ define_class!(
                 eprintln!("Cannot capture screenshot while editing");
                 return;
             }
+            if self.ivars().scroll_capture_state.borrow().is_some() {
+                eprintln!("Cannot capture screenshot while scroll capturing");
+                return;
+            }
             eprintln!("Capture triggered from menu!");
             self.do_capture();
+        }
+
+        #[unsafe(method(startRecording:))]
+        fn start_recording_menu(&self, _sender: &AnyObject) {
+            self.handle_record_hotkey();
+        }
+
+        #[unsafe(method(startScrollCapture:))]
+        fn start_scroll_capture_menu(&self, _sender: &AnyObject) {
+            self.handle_scroll_capture_hotkey();
         }
     }
 
@@ -160,28 +190,95 @@ define_class!(
         fn tool_text(&self, _sender: &AnyObject) {
             self.set_active_tool(ActiveTool::Text);
         }
+
+        #[unsafe(method(toolHighlight:))]
+        fn tool_highlight(&self, _sender: &AnyObject) {
+            self.set_active_tool(ActiveTool::Highlight);
+        }
+
+        #[unsafe(method(toolStep:))]
+        fn tool_step(&self, _sender: &AnyObject) {
+            self.set_active_tool(ActiveTool::Step);
+        }
+
+        #[unsafe(method(toolBlur:))]
+        fn tool_blur(&self, _sender: &AnyObject) {
+            self.set_active_tool(ActiveTool::Blur);
+        }
+
+        #[unsafe(method(toolCrop:))]
+        fn tool_crop(&self, _sender: &AnyObject) {
+            self.set_active_tool(ActiveTool::Crop);
+        }
     }
 
     // --- Color selection ---
     impl AppDelegate {
-        #[unsafe(method(colorRed:))]
-        fn color_red(&self, _sender: &AnyObject) {
-            self.set_annotation_color((1.0, 0.0, 0.0));
+        #[unsafe(method(toggleColorPicker:))]
+        fn toggle_color_picker(&self, _sender: &AnyObject) {
+            let mtm = MainThreadMarker::from(self);
+            if let Some(toolbar) = self.ivars().toolbar.borrow().as_ref() {
+                if toolbar.view.is_color_picker_active() {
+                    // Apply the chosen color when closing via the toggle button
+                    self.apply_color_from_panel(mtm);
+                    toolbar.hide_color_panel(mtm);
+                } else {
+                    // Observe when the color panel is closed by the user
+                    let color_panel = NSColorPanel::sharedColorPanel(mtm);
+                    let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+                    let observer: &AnyObject =
+                        unsafe { &*(self as *const Self as *const AnyObject) };
+                    unsafe {
+                        center.addObserver_selector_name_object(
+                            observer,
+                            sel!(colorPanelClosed:),
+                            Some(objc2_app_kit::NSWindowWillCloseNotification),
+                            Some(&*color_panel),
+                        );
+                    }
+                    toolbar.show_color_panel(mtm);
+                }
+            }
         }
 
-        #[unsafe(method(colorBlue:))]
-        fn color_blue(&self, _sender: &AnyObject) {
-            self.set_annotation_color((0.0, 0.4, 1.0));
+        #[unsafe(method(colorPanelClosed:))]
+        fn color_panel_closed(&self, _notification: &NSNotification) {
+            let mtm = MainThreadMarker::from(self);
+            // Remove the observer to avoid duplicate registrations
+            let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+            let observer: &AnyObject =
+                unsafe { &*(self as *const Self as *const AnyObject) };
+            let color_panel = NSColorPanel::sharedColorPanel(mtm);
+            unsafe {
+                center.removeObserver_name_object(
+                    observer,
+                    Some(objc2_app_kit::NSWindowWillCloseNotification),
+                    Some(&*color_panel),
+                );
+            }
+            // Apply the chosen color and update button state
+            self.apply_color_from_panel(mtm);
+            if let Some(toolbar) = self.ivars().toolbar.borrow().as_ref() {
+                toolbar.view.set_color_picker_active(false);
+            }
+        }
+    }
+
+    // --- Stroke width selection ---
+    impl AppDelegate {
+        #[unsafe(method(strokeThin:))]
+        fn stroke_thin(&self, _sender: &AnyObject) {
+            self.set_stroke_width(1.5, 14.0, 0);
         }
 
-        #[unsafe(method(colorGreen:))]
-        fn color_green(&self, _sender: &AnyObject) {
-            self.set_annotation_color((0.0, 0.8, 0.0));
+        #[unsafe(method(strokeMedium:))]
+        fn stroke_medium(&self, _sender: &AnyObject) {
+            self.set_stroke_width(3.0, 18.0, 1);
         }
 
-        #[unsafe(method(colorYellow:))]
-        fn color_yellow(&self, _sender: &AnyObject) {
-            self.set_annotation_color((1.0, 0.8, 0.0));
+        #[unsafe(method(strokeThick:))]
+        fn stroke_thick(&self, _sender: &AnyObject) {
+            self.set_stroke_width(5.5, 24.0, 2);
         }
     }
 
@@ -195,7 +292,24 @@ define_class!(
                 return;
             }
             if let Some(overlay) = self.ivars().overlay.borrow().as_ref() {
-                overlay.view.ivars().annotations.borrow_mut().pop();
+                if let Some(ann) = overlay.view.ivars().annotations.borrow_mut().pop() {
+                    overlay.view.ivars().redo_stack.borrow_mut().push(ann);
+                }
+                overlay.view.setNeedsDisplay(true);
+            }
+        }
+
+        #[unsafe(method(actionRedo:))]
+        fn action_redo(&self, _sender: &AnyObject) {
+            if let Some(ref editor) = *self.ivars().editor_window.borrow() {
+                let mtm = MainThreadMarker::from(self);
+                editor.redo_annotation(mtm);
+                return;
+            }
+            if let Some(overlay) = self.ivars().overlay.borrow().as_ref() {
+                if let Some(ann) = overlay.view.ivars().redo_stack.borrow_mut().pop() {
+                    overlay.view.ivars().annotations.borrow_mut().push(ann);
+                }
                 overlay.view.setNeedsDisplay(true);
             }
         }
@@ -208,6 +322,7 @@ define_class!(
                 return;
             }
             self.ivars().recording_mode.set(false);
+            self.ivars().scroll_capture_mode.set(false);
             self.dismiss_all();
         }
 
@@ -236,6 +351,11 @@ define_class!(
                 return;
             }
 
+            if self.ivars().scroll_capture_mode.get() {
+                self.start_scroll_capture_with_selection();
+                return;
+            }
+
             if self.ivars().recording_mode.get() {
                 // In recording mode, confirm starts recording with the selection
                 self.start_recording_with_selection();
@@ -256,6 +376,19 @@ define_class!(
     impl AppDelegate {
         #[unsafe(method(selectionChanged:))]
         fn selection_changed(&self, _sender: &AnyObject) {
+            // In scroll capture mode, auto-start once a valid selection is drawn
+            if self.ivars().scroll_capture_mode.get() {
+                if let Some(overlay) = self.ivars().overlay.borrow().as_ref() {
+                    if let Some(sel) = overlay.view.ivars().selection.get() {
+                        let norm = crate::overlay::view::normalize_rect(sel);
+                        if norm.size.width > 5.0 && norm.size.height > 5.0 {
+                            self.start_scroll_capture_with_selection();
+                            return;
+                        }
+                    }
+                }
+            }
+
             let mtm = MainThreadMarker::from(self);
             self.update_toolbar_position(mtm);
         }
@@ -277,6 +410,20 @@ define_class!(
         #[unsafe(method(stopRecording:))]
         fn stop_recording_action(&self, _sender: &AnyObject) {
             self.stop_recording();
+        }
+    }
+
+    // --- Scroll capture timer (called by NSTimer) ---
+    impl AppDelegate {
+        #[unsafe(method(scrollCaptureTick:))]
+        fn scroll_capture_tick(&self, _timer: &NSObject) {
+            let mut state_ref = self.ivars().scroll_capture_state.borrow_mut();
+            if let Some(ref mut state) = *state_ref {
+                if !state.tick() {
+                    drop(state_ref);
+                    self.stop_scroll_capture();
+                }
+            }
         }
     }
 
@@ -369,6 +516,51 @@ define_class!(
             }
         }
 
+        #[unsafe(method(editorMoveAnnotation:y:))]
+        fn editor_move_annotation(&self, dx: CGFloat, dy: CGFloat) {
+            let mtm = MainThreadMarker::from(self);
+            if let Some(ref editor) = *self.ivars().editor_window.borrow() {
+                let active = editor.state.borrow().active_annotation;
+                if let Some(idx) = active {
+                    let mut state = editor.state.borrow_mut();
+                    if let Some(ta) = state.annotations.get_mut(idx) {
+                        ta.annotation.translate(dx, dy);
+                    }
+                    drop(state);
+                    editor.display_current_frame(mtm);
+                }
+            }
+        }
+
+        #[unsafe(method(editorResizeAnnotation:x:y:))]
+        fn editor_resize_annotation(&self, handle_val: u32, x: CGFloat, y: CGFloat) {
+            let mtm = MainThreadMarker::from(self);
+            let handle = match handle_val {
+                0 => crate::annotation::model::HandleKind::ArrowStart,
+                1 => crate::annotation::model::HandleKind::ArrowEnd,
+                2 => crate::annotation::model::HandleKind::TopLeft,
+                3 => crate::annotation::model::HandleKind::Top,
+                4 => crate::annotation::model::HandleKind::TopRight,
+                5 => crate::annotation::model::HandleKind::Left,
+                6 => crate::annotation::model::HandleKind::Right,
+                7 => crate::annotation::model::HandleKind::BottomLeft,
+                8 => crate::annotation::model::HandleKind::Bottom,
+                9 => crate::annotation::model::HandleKind::BottomRight,
+                _ => return,
+            };
+            if let Some(ref editor) = *self.ivars().editor_window.borrow() {
+                let active = editor.state.borrow().active_annotation;
+                if let Some(idx) = active {
+                    let mut state = editor.state.borrow_mut();
+                    if let Some(ta) = state.annotations.get_mut(idx) {
+                        ta.annotation.apply_resize(handle, CGPoint::new(x, y));
+                    }
+                    drop(state);
+                    editor.display_current_frame(mtm);
+                }
+            }
+        }
+
         #[unsafe(method(editorMiniBarChanged:))]
         fn editor_mini_bar_changed(&self, _sender: &AnyObject) {
             let mtm = MainThreadMarker::from(self);
@@ -412,6 +604,8 @@ impl AppDelegate {
             recording_state: RefCell::new(None),
             recording_border: RefCell::new(None),
             editor_window: RefCell::new(None),
+            scroll_capture_mode: Cell::new(false),
+            scroll_capture_state: RefCell::new(None),
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -424,9 +618,12 @@ impl AppDelegate {
             toolbar.hide();
         }
 
+        // Find the screen containing the mouse cursor
+        let screen = crate::screen::screen_with_mouse(mtm);
+
         if let Some(cg_image) = crate::capture::capture_full_screen() {
             if let Some(overlay) = self.ivars().overlay.borrow().as_ref() {
-                overlay.show_with_screenshot(&cg_image, mtm);
+                overlay.show_with_screenshot(&cg_image, &screen, mtm);
             }
             *self.ivars().captured_image.borrow_mut() = Some(cg_image);
         }
@@ -458,8 +655,8 @@ impl AppDelegate {
     fn start_recording_with_selection(&self) {
         let mtm = MainThreadMarker::from(self);
 
-        // Read selection from overlay
-        let (selection, scale_factor) = {
+        // Read selection from overlay, and get display info from the overlay's screen
+        let (selection, scale_factor, display_id, screen_frame) = {
             let overlay_ref = self.ivars().overlay.borrow();
             let overlay = match overlay_ref.as_ref() {
                 Some(o) => o,
@@ -473,7 +670,9 @@ impl AppDelegate {
                 }
             };
             let sf = overlay.view.ivars().scale_factor.get();
-            (sel, sf)
+            let sf_frame = overlay.window.frame();
+            let did = crate::screen::display_with_mouse();
+            (sel, sf, did, sf_frame)
         };
 
         // Dismiss overlay and toolbar
@@ -510,7 +709,7 @@ impl AppDelegate {
         };
 
         // Start encoder
-        let mut recording = RecordingState::new(encoder, selection, scale_factor);
+        let mut recording = RecordingState::new(encoder, selection, scale_factor, display_id);
         if let Err(e) = recording.encoder.start() {
             eprintln!("Failed to start recording: {}", e);
             return;
@@ -534,7 +733,7 @@ impl AppDelegate {
 
         // Show the border window around the recording region and exclude it from capture
         if let Some(border) = self.ivars().recording_border.borrow().as_ref() {
-            border.show(selection, mtm);
+            border.show(selection, screen_frame);
             recording.exclude_window_id = Some(border.window_number());
         }
 
@@ -610,14 +809,13 @@ impl AppDelegate {
         }
     }
 
-    fn show_editor_toolbar(&self, mtm: MainThreadMarker) {
+    fn show_editor_toolbar(&self, _mtm: MainThreadMarker) {
         if let Some(toolbar) = self.ivars().toolbar.borrow().as_ref() {
-            // Position toolbar at top-center of screen for editor mode
-            let screen = objc2_app_kit::NSScreen::mainScreen(mtm).expect("no main screen");
-            let screen_frame = screen.frame();
+            // Position toolbar at top-center of the screen where the mouse is
+            let screen_frame = crate::screen::screen_with_mouse(MainThreadMarker::from(self)).frame();
             let toolbar_size = toolbar.view.frame().size;
-            let x = (screen_frame.size.width - toolbar_size.width) / 2.0;
-            let y = screen_frame.size.height - toolbar_size.height - 40.0;
+            let x = screen_frame.origin.x + (screen_frame.size.width - toolbar_size.width) / 2.0;
+            let y = screen_frame.origin.y + screen_frame.size.height - toolbar_size.height - 40.0;
             toolbar.panel.setFrameOrigin(objc2_core_foundation::CGPoint::new(x, y));
             toolbar.panel.orderFrontRegardless();
         }
@@ -630,6 +828,14 @@ impl AppDelegate {
         let Some(ref editor) = *editor_ref else {
             return;
         };
+
+        // Single-frame mode: export as image instead of video
+        let is_single_frame = editor.decoder.total_frames() == 1;
+        if is_single_frame {
+            drop(editor_ref);
+            self.export_editor_as_image();
+            return;
+        }
 
         // Commit any pending text field
         editor.view.commit_text_field();
@@ -713,7 +919,21 @@ impl AppDelegate {
                 );
             }
 
+            let is_single_frame = editor.decoder.total_frames() == 1;
             let video_path = editor.state.borrow().video_path.clone();
+
+            // For single-frame mode (scroll capture), offer to save as PNG
+            if is_single_frame {
+                if let Some(source_image) = editor.decoder.frame_at(0) {
+                    editor.close();
+                    if let Some(toolbar) = self.ivars().toolbar.borrow().as_ref() {
+                        toolbar.hide();
+                    }
+                    crate::actions::save_to_file(source_image, mtm);
+                    return;
+                }
+            }
+
             editor.close();
 
             if let Some(toolbar) = self.ivars().toolbar.borrow().as_ref() {
@@ -753,6 +973,23 @@ impl AppDelegate {
     }
 
     fn set_active_tool(&self, tool: ActiveTool) {
+        // Map ActiveTool to toolbar button index
+        let tool_index = match tool {
+            ActiveTool::Select => 0,
+            ActiveTool::Arrow => 1,
+            ActiveTool::Rectangle => 2,
+            ActiveTool::Ellipse => 3,
+            ActiveTool::Pencil => 4,
+            ActiveTool::Text => 5,
+            ActiveTool::Highlight => 6,
+            ActiveTool::Step => 7,
+            ActiveTool::Blur => 8,
+            ActiveTool::Crop => 9,
+        };
+        // Update toolbar visual state
+        if let Some(toolbar) = self.ivars().toolbar.borrow().as_ref() {
+            toolbar.view.set_active_tool(tool_index);
+        }
         if let Some(ref editor) = *self.ivars().editor_window.borrow() {
             editor.view.commit_text_field();
             editor.view.ivars().active_tool.set(tool);
@@ -761,6 +998,35 @@ impl AppDelegate {
         if let Some(overlay) = self.ivars().overlay.borrow().as_ref() {
             overlay.view.commit_text_field();
             overlay.view.ivars().active_tool.set(tool);
+        }
+    }
+
+    fn set_stroke_width(&self, width: CGFloat, font_size: CGFloat, stroke_index: usize) {
+        // Update toolbar visual state
+        if let Some(toolbar) = self.ivars().toolbar.borrow().as_ref() {
+            toolbar.view.set_active_stroke(stroke_index);
+        }
+        if let Some(ref editor) = *self.ivars().editor_window.borrow() {
+            editor.view.ivars().annotation_width.set(width);
+            editor.view.ivars().annotation_font_size.set(font_size);
+            return;
+        }
+        if let Some(overlay) = self.ivars().overlay.borrow().as_ref() {
+            overlay.view.ivars().annotation_width.set(width);
+            overlay.view.ivars().annotation_font_size.set(font_size);
+        }
+    }
+
+    fn apply_color_from_panel(&self, mtm: MainThreadMarker) {
+        let color_panel = NSColorPanel::sharedColorPanel(mtm);
+        let color = color_panel.color();
+        let r: CGFloat = unsafe { msg_send![&color, redComponent] };
+        let g: CGFloat = unsafe { msg_send![&color, greenComponent] };
+        let b: CGFloat = unsafe { msg_send![&color, blueComponent] };
+        self.set_annotation_color((r, g, b));
+        // Update the color button tint
+        if let Some(toolbar) = self.ivars().toolbar.borrow().as_ref() {
+            toolbar.view.set_color(r, g, b);
         }
     }
 
@@ -800,7 +1066,7 @@ impl AppDelegate {
         crate::actions::crop_and_composite(cg_image, norm, scale_factor, &annotations)
     }
 
-    fn update_toolbar_position(&self, mtm: MainThreadMarker) {
+    fn update_toolbar_position(&self, _mtm: MainThreadMarker) {
         let overlay_ref = self.ivars().overlay.borrow();
         let overlay = overlay_ref.as_ref();
         let toolbar_ref = self.ivars().toolbar.borrow();
@@ -810,12 +1076,253 @@ impl AppDelegate {
             if let Some(selection) = overlay.view.ivars().selection.get() {
                 let norm = crate::overlay::view::normalize_rect(selection);
                 if norm.size.width > 5.0 && norm.size.height > 5.0 {
-                    toolbar.show_near_selection(norm, mtm);
+                    // Use the overlay window's screen for toolbar positioning
+                    let screen_frame = overlay.window.frame();
+                    toolbar.show_near_selection(norm, screen_frame);
                     let _: () = unsafe {
                         msg_send![&*overlay.window, addChildWindow: &*toolbar.panel, ordered: 1i64]
                     };
                 }
             }
+        }
+    }
+
+    fn handle_scroll_capture_hotkey(&self) {
+        // Don't start scroll capture while recording or editing
+        if self.ivars().recording_state.borrow().is_some() {
+            eprintln!("Cannot start scroll capture while recording");
+            return;
+        }
+        if self.ivars().editor_window.borrow().is_some() {
+            eprintln!("Cannot start scroll capture while editing");
+            return;
+        }
+
+        // Set scroll capture mode and show overlay for region selection
+        self.ivars().scroll_capture_mode.set(true);
+        if let Some(toolbar) = self.ivars().toolbar.borrow().as_ref() {
+            toolbar.set_non_confirm_buttons_enabled(false);
+        }
+        eprintln!("Scroll capture hotkey pressed — select region then confirm");
+        self.do_capture();
+    }
+
+    fn start_scroll_capture_with_selection(&self) {
+        let mtm = MainThreadMarker::from(self);
+
+        // Read selection from overlay, and get display info from the overlay's screen
+        let (selection, scale_factor, display_id, screen_frame) = {
+            let overlay_ref = self.ivars().overlay.borrow();
+            let overlay = match overlay_ref.as_ref() {
+                Some(o) => o,
+                None => return,
+            };
+            let sel = match overlay.view.ivars().selection.get() {
+                Some(s) => crate::overlay::view::normalize_rect(s),
+                None => {
+                    eprintln!("No selection for scroll capture");
+                    return;
+                }
+            };
+            let sf = overlay.view.ivars().scale_factor.get();
+            let sf_frame = overlay.window.frame();
+            let did = crate::screen::display_with_mouse();
+            (sel, sf, did, sf_frame)
+        };
+
+        // Dismiss overlay and clear mode
+        self.ivars().scroll_capture_mode.set(false);
+        self.dismiss_all();
+
+        // Show the border window around the capture region so user can see the selected area
+        if let Some(border) = self.ivars().recording_border.borrow().as_ref() {
+            border.show(selection, screen_frame);
+        }
+
+        // Create scroll capture state
+        let mut state = ScrollCaptureState::new(
+            selection,
+            scale_factor,
+            screen_frame.size.height,
+            display_id,
+        );
+
+        // Exclude the border window from screen captures
+        if let Some(border) = self.ivars().recording_border.borrow().as_ref() {
+            state.set_border_window_id(border.window_number());
+        }
+
+        // Capture initial frame before starting timer
+        state.capture_initial_frame();
+
+        // Start timer for scroll capture ticks
+        let target: &AnyObject = unsafe { &*(self as *const Self as *const AnyObject) };
+        let timer = unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                state.settle_delay,
+                target,
+                sel!(scrollCaptureTick:),
+                None,
+                true,
+            )
+        };
+        state.timer = Some(timer);
+
+        *self.ivars().scroll_capture_state.borrow_mut() = Some(state);
+
+        // Show status bar recording indicator
+        if let Some(sb) = self.ivars().status_bar.borrow().as_ref() {
+            sb.enter_recording_mode(mtm);
+        }
+
+        eprintln!("Scroll capture started");
+    }
+
+    fn stop_scroll_capture(&self) {
+        let mtm = MainThreadMarker::from(self);
+
+        let state = self.ivars().scroll_capture_state.borrow_mut().take();
+        let Some(mut state) = state else {
+            return;
+        };
+
+        // Invalidate timer
+        if let Some(timer) = state.timer.take() {
+            timer.invalidate();
+        }
+
+        // Hide the border window
+        if let Some(border) = self.ivars().recording_border.borrow().as_ref() {
+            border.hide();
+        }
+
+        // Exit recording mode in status bar
+        if let Some(sb) = self.ivars().status_bar.borrow().as_ref() {
+            sb.exit_recording_mode(mtm);
+        }
+
+        let frame_count = state.frames.len();
+        eprintln!("Scroll capture stopped: {} frames captured", frame_count);
+
+        if frame_count == 0 {
+            eprintln!("No frames captured");
+            return;
+        }
+
+        // Stitch frames
+        let stitched = crate::stitch::stitch_frames(&state.frames);
+        let Some(stitched) = stitched else {
+            eprintln!("Failed to stitch frames");
+            return;
+        };
+
+        let width = CGImage::width(Some(&stitched));
+        let height = CGImage::height(Some(&stitched));
+        eprintln!("Stitched image: {}x{}", width, height);
+
+        // Create decoder from stitched image and open editor
+        let decoder = crate::editor::decoder::VideoDecoder::from_image(stitched);
+
+        // Use a temporary path for the editor state
+        let tmp_path = std::env::temp_dir().join(format!(
+            "screenshot_scroll_{}.png",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        ));
+
+        match EditorWindow::open_with_decoder(decoder, "Edit Scroll Capture", &tmp_path, mtm) {
+            Ok(editor) => {
+                // Observe window close
+                let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+                let observer: &AnyObject =
+                    unsafe { &*(self as *const Self as *const AnyObject) };
+                unsafe {
+                    center.addObserver_selector_name_object(
+                        observer,
+                        sel!(editorWindowClosed:),
+                        Some(objc2_app_kit::NSWindowWillCloseNotification),
+                        Some(&*editor.window),
+                    );
+                }
+
+                self.show_editor_toolbar(mtm);
+                *self.ivars().editor_window.borrow_mut() = Some(editor);
+            }
+            Err(e) => {
+                eprintln!("Failed to open editor for scroll capture: {}", e);
+            }
+        }
+    }
+
+    fn export_editor_as_image(&self) {
+        let mtm = MainThreadMarker::from(self);
+
+        let editor_ref = self.ivars().editor_window.borrow();
+        let Some(ref editor) = *editor_ref else {
+            return;
+        };
+
+        // Commit any pending text field
+        editor.view.commit_text_field();
+
+        let Some(source_image) = editor.decoder.frame_at(0) else {
+            drop(editor_ref);
+            return;
+        };
+
+        let state = editor.sessions();
+        let annotations: Vec<&crate::annotation::model::Annotation> = state
+            .annotations
+            .iter()
+            .map(|ta| &ta.annotation)
+            .collect();
+
+        let width = editor.decoder.width();
+        let height = editor.decoder.height();
+        let composited = crate::editor::export::composite_frame(source_image, &annotations, width, height);
+
+        // Apply crop if present
+        let crop_rect = editor.view.ivars().crop_rect.get();
+        let final_image = if let (Some(img), Some(crop)) = (&composited, crop_rect) {
+            let norm = crate::overlay::view::normalize_rect(crop);
+            // Scale from view coords to pixel coords
+            let view_bounds = editor.view.bounds();
+            let sx = width as CGFloat / view_bounds.size.width;
+            let sy = height as CGFloat / view_bounds.size.height;
+            let pixel_crop = objc2_core_foundation::CGRect::new(
+                CGPoint::new(norm.origin.x * sx, norm.origin.y * sy),
+                objc2_core_foundation::CGSize::new(norm.size.width * sx, norm.size.height * sy),
+            );
+            objc2_core_graphics::CGImage::with_image_in_rect(Some(img), pixel_crop)
+        } else {
+            composited
+        };
+
+        drop(state);
+        drop(editor_ref);
+
+        // Close editor
+        if let Some(editor) = self.ivars().editor_window.borrow_mut().take() {
+            let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+            let observer: &AnyObject =
+                unsafe { &*(self as *const Self as *const AnyObject) };
+            unsafe {
+                center.removeObserver_name_object(
+                    observer,
+                    Some(objc2_app_kit::NSWindowWillCloseNotification),
+                    Some(&*editor.window),
+                );
+            }
+            editor.close();
+        }
+        if let Some(toolbar) = self.ivars().toolbar.borrow().as_ref() {
+            toolbar.hide();
+        }
+
+        if let Some(image) = final_image {
+            crate::actions::save_to_file(&image, mtm);
         }
     }
 }

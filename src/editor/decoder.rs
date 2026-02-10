@@ -117,6 +117,19 @@ impl VideoDecoder {
         })
     }
 
+    /// Create a decoder from a single static image (for scroll capture stitched results).
+    pub fn from_image(image: CFRetained<CGImage>) -> Self {
+        let width = CGImage::width(Some(&image));
+        let height = CGImage::height(Some(&image));
+        eprintln!("VideoDecoder: static image {}x{}", width, height);
+        VideoDecoder {
+            frames: vec![image],
+            fps: 1.0,
+            width,
+            height,
+        }
+    }
+
     pub fn frame_at(&self, index: usize) -> Option<&CGImage> {
         self.frames.get(index).map(|f| &**f)
     }

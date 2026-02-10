@@ -2,6 +2,26 @@ use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
 
 /// Padding added to bounding rects for hit-testing tolerance.
 const HIT_TEST_PADDING: CGFloat = 4.0;
+/// Tolerance for hitting a resize handle.
+const HANDLE_HIT_TOLERANCE: CGFloat = 6.0;
+
+/// Identifies a specific resize handle on an annotation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum HandleKind {
+    /// Arrow start control point.
+    ArrowStart,
+    /// Arrow end control point.
+    ArrowEnd,
+    /// Rect/Ellipse corners and edges.
+    TopLeft,
+    Top,
+    TopRight,
+    Left,
+    Right,
+    BottomLeft,
+    Bottom,
+    BottomRight,
+}
 
 #[derive(Clone)]
 pub enum Annotation {
@@ -33,6 +53,23 @@ pub enum Annotation {
         text: String,
         color: (CGFloat, CGFloat, CGFloat),
         font_size: CGFloat,
+    },
+    Highlight {
+        origin: CGPoint,
+        size: CGSize,
+        color: (CGFloat, CGFloat, CGFloat),
+        opacity: CGFloat,
+    },
+    Step {
+        center: CGPoint,
+        number: u32,
+        color: (CGFloat, CGFloat, CGFloat),
+        radius: CGFloat,
+    },
+    Blur {
+        origin: CGPoint,
+        size: CGSize,
+        block_size: usize,
     },
 }
 
@@ -85,6 +122,18 @@ impl Annotation {
                     CGSize::new(estimated_width, estimated_height),
                 )
             }
+            Annotation::Highlight { origin, size, .. } => {
+                normalize_annotation_rect(*origin, *size)
+            }
+            Annotation::Step { center, radius, .. } => {
+                CGRect::new(
+                    CGPoint::new(center.x - radius, center.y - radius),
+                    CGSize::new(radius * 2.0, radius * 2.0),
+                )
+            }
+            Annotation::Blur { origin, size, .. } => {
+                normalize_annotation_rect(*origin, *size)
+            }
         }
     }
 
@@ -95,6 +144,97 @@ impl Annotation {
             && point.x <= rect.origin.x + rect.size.width
             && point.y >= rect.origin.y
             && point.y <= rect.origin.y + rect.size.height
+    }
+
+    /// Translate the annotation by (dx, dy).
+    pub fn translate(&mut self, dx: CGFloat, dy: CGFloat) {
+        match self {
+            Annotation::Arrow { start, end, .. } => {
+                start.x += dx;
+                start.y += dy;
+                end.x += dx;
+                end.y += dy;
+            }
+            Annotation::Rect { origin, .. }
+            | Annotation::Ellipse { origin, .. }
+            | Annotation::Highlight { origin, .. } => {
+                origin.x += dx;
+                origin.y += dy;
+            }
+            Annotation::Pencil { points, .. } => {
+                for p in points.iter_mut() {
+                    p.x += dx;
+                    p.y += dy;
+                }
+            }
+            Annotation::Text { position, .. } => {
+                position.x += dx;
+                position.y += dy;
+            }
+            Annotation::Step { center, .. } => {
+                center.x += dx;
+                center.y += dy;
+            }
+            Annotation::Blur { origin, .. } => {
+                origin.x += dx;
+                origin.y += dy;
+            }
+        }
+    }
+
+    /// Return the resize handle positions for this annotation.
+    /// Returns an empty vec for types that don't support resizing (Pencil, Text).
+    pub fn resize_handles(&self) -> Vec<(HandleKind, CGPoint)> {
+        match self {
+            Annotation::Arrow { start, end, .. } => {
+                vec![
+                    (HandleKind::ArrowStart, *start),
+                    (HandleKind::ArrowEnd, *end),
+                ]
+            }
+            Annotation::Rect { origin, size, .. }
+            | Annotation::Ellipse { origin, size, .. }
+            | Annotation::Highlight { origin, size, .. }
+            | Annotation::Blur { origin, size, .. } => {
+                let r = normalize_annotation_rect(*origin, *size);
+                rect_handles(r)
+            }
+            _ => vec![],
+        }
+    }
+
+    /// Hit-test against this annotation's resize handles.
+    /// Returns the handle kind if a handle is within tolerance of the point.
+    pub fn hit_test_handle(&self, point: CGPoint) -> Option<HandleKind> {
+        for (kind, hp) in self.resize_handles() {
+            if (point.x - hp.x).abs() <= HANDLE_HIT_TOLERANCE
+                && (point.y - hp.y).abs() <= HANDLE_HIT_TOLERANCE
+            {
+                return Some(kind);
+            }
+        }
+        None
+    }
+
+    /// Apply a resize operation by moving a specific handle to a new point.
+    pub fn apply_resize(&mut self, handle: HandleKind, point: CGPoint) {
+        match self {
+            Annotation::Arrow { start, end, .. } => match handle {
+                HandleKind::ArrowStart => *start = point,
+                HandleKind::ArrowEnd => *end = point,
+                _ => {}
+            },
+            Annotation::Rect { origin, size, .. }
+            | Annotation::Ellipse { origin, size, .. }
+            | Annotation::Highlight { origin, size, .. }
+            | Annotation::Blur { origin, size, .. } => {
+                let r = normalize_annotation_rect(*origin, *size);
+                let new_r = apply_rect_resize(r, handle, point);
+                *origin = new_r.origin;
+                *size = new_r.size;
+            }
+            _ => {}
+        }
     }
 }
 
@@ -116,10 +256,23 @@ pub fn update_annotation(ann: &mut Annotation, point: CGPoint) {
             size.width = point.x - origin.x;
             size.height = point.y - origin.y;
         }
+        Annotation::Highlight {
+            origin, size, ..
+        } => {
+            size.width = point.x - origin.x;
+            size.height = point.y - origin.y;
+        }
         Annotation::Pencil { points, .. } => {
             points.push(point);
         }
         Annotation::Text { .. } => {}
+        Annotation::Step { .. } => {}
+        Annotation::Blur {
+            origin, size, ..
+        } => {
+            size.width = point.x - origin.x;
+            size.height = point.y - origin.y;
+        }
     }
 }
 
@@ -132,6 +285,38 @@ fn normalize_annotation_rect(origin: CGPoint, size: CGSize) -> CGRect {
         ),
         CGSize::new(size.width.abs(), size.height.abs()),
     )
+}
+
+/// Return 8 resize handles (4 corners + 4 edges) for a normalized rect.
+fn rect_handles(r: CGRect) -> Vec<(HandleKind, CGPoint)> {
+    let (x, y, w, h) = (r.origin.x, r.origin.y, r.size.width, r.size.height);
+    vec![
+        (HandleKind::TopLeft, CGPoint::new(x, y)),
+        (HandleKind::Top, CGPoint::new(x + w / 2.0, y)),
+        (HandleKind::TopRight, CGPoint::new(x + w, y)),
+        (HandleKind::Left, CGPoint::new(x, y + h / 2.0)),
+        (HandleKind::Right, CGPoint::new(x + w, y + h / 2.0)),
+        (HandleKind::BottomLeft, CGPoint::new(x, y + h)),
+        (HandleKind::Bottom, CGPoint::new(x + w / 2.0, y + h)),
+        (HandleKind::BottomRight, CGPoint::new(x + w, y + h)),
+    ]
+}
+
+/// Apply a rect resize by moving a specific handle to a new point.
+fn apply_rect_resize(r: CGRect, handle: HandleKind, point: CGPoint) -> CGRect {
+    let (x, y, w, h) = (r.origin.x, r.origin.y, r.size.width, r.size.height);
+    let (nx, ny, nw, nh) = match handle {
+        HandleKind::TopLeft => (point.x, point.y, x + w - point.x, y + h - point.y),
+        HandleKind::Top => (x, point.y, w, y + h - point.y),
+        HandleKind::TopRight => (x, point.y, point.x - x, y + h - point.y),
+        HandleKind::Left => (point.x, y, x + w - point.x, h),
+        HandleKind::Right => (x, y, point.x - x, h),
+        HandleKind::BottomLeft => (point.x, y, x + w - point.x, point.y - y),
+        HandleKind::Bottom => (x, y, w, point.y - y),
+        HandleKind::BottomRight => (x, y, point.x - x, point.y - y),
+        _ => (x, y, w, h),
+    };
+    CGRect::new(CGPoint::new(nx, ny), CGSize::new(nw, nh))
 }
 
 /// Inflate a rect by a given amount on all sides.

@@ -1,11 +1,16 @@
 use objc2::rc::Retained;
 use objc2::runtime::Sel;
-use objc2_app_kit::{NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength};
+use objc2_app_kit::{
+    NSEventModifierFlags, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
+    NSVariableStatusItemLength,
+};
 use objc2_foundation::{MainThreadMarker, NSString};
 
 pub struct StatusBar {
     status_item: Retained<NSStatusItem>,
-    capture_item: Retained<NSMenuItem>,
+    /// Items shown in normal (non-recording) mode.
+    normal_items: Vec<Retained<NSMenuItem>>,
+    /// "Stop Recording" item, shown only during recording/scroll capture.
     stop_recording_item: Retained<NSMenuItem>,
 }
 
@@ -19,21 +24,41 @@ impl StatusBar {
             button.setTitle(&NSString::from_str("\u{1F4F7}")); // 📷
         }
 
-        // Create menu
         let menu = NSMenu::new(mtm);
+        let ctrl_cmd =
+            NSEventModifierFlags::Command.union(NSEventModifierFlags::Control);
 
-        // Capture item - action routes through responder chain to app delegate
-        let capture_item = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(
-                mtm.alloc(),
-                &NSString::from_str("Capture"),
-                Some(Sel::register(c"captureScreenshot:")),
-                &NSString::from_str(""),
-            )
-        };
+        // Capture Screenshot  (Ctrl+Cmd+A)
+        let capture_item = create_menu_item(
+            mtm,
+            "Capture Screenshot",
+            c"captureScreenshot:",
+            "a",
+            ctrl_cmd,
+        );
         menu.addItem(&capture_item);
 
-        // Stop Recording item - hidden by default
+        // Record Screen  (Ctrl+Cmd+V)
+        let record_item = create_menu_item(
+            mtm,
+            "Record Screen",
+            c"startRecording:",
+            "v",
+            ctrl_cmd,
+        );
+        menu.addItem(&record_item);
+
+        // Scroll Capture  (Ctrl+Cmd+S)
+        let scroll_item = create_menu_item(
+            mtm,
+            "Scroll Capture",
+            c"startScrollCapture:",
+            "s",
+            ctrl_cmd,
+        );
+        menu.addItem(&scroll_item);
+
+        // Stop Recording - hidden by default
         let stop_recording_item = unsafe {
             NSMenuItem::initWithTitle_action_keyEquivalent(
                 mtm.alloc(),
@@ -48,7 +73,7 @@ impl StatusBar {
         // Separator
         menu.addItem(&NSMenuItem::separatorItem(mtm));
 
-        // Quit item
+        // Quit
         let quit_item = unsafe {
             NSMenuItem::initWithTitle_action_keyEquivalent(
                 mtm.alloc(),
@@ -63,7 +88,7 @@ impl StatusBar {
 
         StatusBar {
             status_item,
-            capture_item,
+            normal_items: vec![capture_item, record_item, scroll_item],
             stop_recording_item,
         }
     }
@@ -72,7 +97,9 @@ impl StatusBar {
         if let Some(button) = self.status_item.button(mtm) {
             button.setTitle(&NSString::from_str("\u{1F534}")); // 🔴
         }
-        self.capture_item.setHidden(true);
+        for item in &self.normal_items {
+            item.setHidden(true);
+        }
         self.stop_recording_item.setHidden(false);
     }
 
@@ -80,7 +107,28 @@ impl StatusBar {
         if let Some(button) = self.status_item.button(mtm) {
             button.setTitle(&NSString::from_str("\u{1F4F7}")); // 📷
         }
-        self.capture_item.setHidden(false);
+        for item in &self.normal_items {
+            item.setHidden(false);
+        }
         self.stop_recording_item.setHidden(true);
     }
+}
+
+fn create_menu_item(
+    mtm: MainThreadMarker,
+    title: &str,
+    action: &std::ffi::CStr,
+    key: &str,
+    modifiers: NSEventModifierFlags,
+) -> Retained<NSMenuItem> {
+    let item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            mtm.alloc(),
+            &NSString::from_str(title),
+            Some(Sel::register(action)),
+            &NSString::from_str(key),
+        )
+    };
+    item.setKeyEquivalentModifierMask(modifiers);
+    item
 }
