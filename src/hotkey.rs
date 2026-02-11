@@ -21,10 +21,10 @@ impl HotkeyManager {
             .register(capture_hotkey)
             .expect("failed to register capture hotkey");
 
-        // Register Ctrl+Cmd+V for screen recording
+        // Register Ctrl+Cmd+Z for screen recording
         let record_hotkey = HotKey::new(
             Some(Modifiers::CONTROL | Modifiers::META),
-            Code::KeyV,
+            Code::KeyZ,
         );
         manager
             .register(record_hotkey)
@@ -40,7 +40,7 @@ impl HotkeyManager {
             .expect("failed to register scroll capture hotkey");
 
         eprintln!(
-            "Global hotkeys registered: Ctrl+Cmd+A (id={}), Ctrl+Cmd+V (id={}), Ctrl+Cmd+S (id={})",
+            "Global hotkeys registered: Ctrl+Cmd+A (id={}), Ctrl+Cmd+Z (id={}), Ctrl+Cmd+S (id={})",
             capture_hotkey.id(),
             record_hotkey.id(),
             scroll_capture_hotkey.id(),

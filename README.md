@@ -35,7 +35,7 @@ The app appears as a camera icon in the menu bar with no Dock icon.
 | Hotkey | Action |
 |---|---|
 | Ctrl+Cmd+A | Capture screenshot |
-| Ctrl+Cmd+V | Start/stop screen recording |
+| Ctrl+Cmd+Z | Start/stop screen recording |
 | Ctrl+Cmd+S | Scroll capture |
 
 ## Workflow
@@ -49,10 +49,10 @@ The app appears as a camera icon in the menu bar with no Dock icon.
 
 ### Screen Recording
 
-1. **Ctrl+Cmd+V** — overlay appears for region selection
+1. **Ctrl+Cmd+Z** — overlay appears for region selection
 2. Draw the recording area — recording starts immediately
 3. A red border outlines the captured region (click-through)
-4. **Ctrl+Cmd+V** again or **Stop Recording** from the menu bar to finish
+4. **Ctrl+Cmd+Z** again or **Stop Recording** from the menu bar to finish
 5. The editor opens with the recorded video for annotation and export
 
 ### Scroll Capture

@@ -40,6 +40,8 @@ pub struct AppDelegateIvars {
     scroll_capture_mode: Cell<bool>,
     /// Active scroll capture state (frames + timer)
     scroll_capture_state: RefCell<Option<ScrollCaptureState>>,
+    /// True when the editor is being closed via cancel (discard without saving)
+    editor_cancelled: Cell<bool>,
 }
 
 define_class!(
@@ -91,7 +93,7 @@ define_class!(
                 );
             }
 
-            eprintln!("ClipShot started. Ctrl+Cmd+A=capture, Ctrl+Cmd+V=record, Ctrl+Cmd+S=scroll capture.");
+            eprintln!("ClipShot started. Ctrl+Cmd+A=capture, Ctrl+Cmd+Z=record, Ctrl+Cmd+S=scroll capture.");
         }
     }
 
@@ -324,9 +326,9 @@ define_class!(
 
         #[unsafe(method(actionCancel:))]
         fn action_cancel(&self, _sender: &AnyObject) {
-            // If editor is open, ask its window to close (triggers NSWindowWillCloseNotification
-            // which defers cleanup to the next run-loop iteration, avoiding use-after-free)
+            // If editor is open, mark as cancelled (discard without saving) and close
             if let Some(ref editor) = *self.ivars().editor_window.borrow() {
+                self.ivars().editor_cancelled.set(true);
                 editor.window.close();
                 return;
             }
@@ -520,7 +522,12 @@ define_class!(
 
         #[unsafe(method(deferredEditorCleanup:))]
         fn deferred_editor_cleanup(&self, _sender: Option<&AnyObject>) {
-            self.close_editor_and_save_raw();
+            if self.ivars().editor_cancelled.get() {
+                self.ivars().editor_cancelled.set(false);
+                self.close_editor_discard();
+            } else {
+                self.close_editor_and_save_raw();
+            }
         }
 
         #[unsafe(method(editorConfirmAnnotation:))]
@@ -655,6 +662,7 @@ impl AppDelegate {
             editor_window: RefCell::new(None),
             scroll_capture_mode: Cell::new(false),
             scroll_capture_state: RefCell::new(None),
+            editor_cancelled: Cell::new(false),
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -842,8 +850,8 @@ impl AppDelegate {
                     );
                 }
 
-                // Show the toolbar near the editor window
-                self.show_editor_toolbar(mtm);
+                // Show the toolbar attached above the editor window
+                self.show_editor_toolbar(&editor);
                 *self.ivars().editor_window.borrow_mut() = Some(editor);
             }
             Err(e) => {
@@ -854,15 +862,21 @@ impl AppDelegate {
         }
     }
 
-    fn show_editor_toolbar(&self, _mtm: MainThreadMarker) {
+    fn show_editor_toolbar(&self, editor: &EditorWindow) {
         if let Some(toolbar) = self.ivars().toolbar.borrow().as_ref() {
-            // Position toolbar at top-center of the screen where the mouse is
-            let screen_frame = crate::screen::screen_with_mouse(MainThreadMarker::from(self)).frame();
+            // Position toolbar centered above the editor window with a small gap
+            let editor_frame = editor.window.frame();
             let toolbar_size = toolbar.view.frame().size;
-            let x = screen_frame.origin.x + (screen_frame.size.width - toolbar_size.width) / 2.0;
-            let y = screen_frame.origin.y + screen_frame.size.height - toolbar_size.height - 40.0;
+            let gap: CGFloat = 4.0;
+            let x = editor_frame.origin.x + (editor_frame.size.width - toolbar_size.width) / 2.0;
+            let y = editor_frame.origin.y + editor_frame.size.height + gap;
             toolbar.panel.setFrameOrigin(objc2_core_foundation::CGPoint::new(x, y));
             toolbar.panel.orderFrontRegardless();
+
+            // Attach toolbar as child window so it moves with the editor
+            let _: () = unsafe {
+                msg_send![&*editor.window, addChildWindow: &*toolbar.panel, ordered: 1i64]
+            };
         }
     }
 
@@ -944,6 +958,33 @@ impl AppDelegate {
         } else {
             // No annotations: save the raw video directly
             self.show_save_dialog_for_recording(&video_path, mtm);
+        }
+    }
+
+    /// Close the editor and discard everything (cancel). No save, no clipboard copy.
+    fn close_editor_discard(&self) {
+        let editor = self.ivars().editor_window.borrow_mut().take();
+        if let Some(editor) = editor {
+            // Remove notification observer
+            let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+            let observer: &AnyObject =
+                unsafe { &*(self as *const Self as *const AnyObject) };
+            unsafe {
+                center.removeObserver_name_object(
+                    observer,
+                    Some(objc2_app_kit::NSWindowWillCloseNotification),
+                    Some(&*editor.window),
+                );
+            }
+
+            // Clean up temp video file
+            let video_path = editor.state.borrow().video_path.clone();
+            let _ = std::fs::remove_file(&video_path);
+
+            editor.close();
+        }
+        if let Some(toolbar) = self.ivars().toolbar.borrow().as_ref() {
+            toolbar.hide();
         }
     }
 
@@ -1300,7 +1341,7 @@ impl AppDelegate {
                     );
                 }
 
-                self.show_editor_toolbar(mtm);
+                self.show_editor_toolbar(&editor);
                 *self.ivars().editor_window.borrow_mut() = Some(editor);
             }
             Err(e) => {

@@ -48,6 +48,7 @@ objc2-app-kit = { version = "0.3", features = [
 objc2-core-graphics = { version = "0.3", features = [
     "CGContext",
     "CGImage",
+    "CGColor",
     "CGColorSpace",
     "CGGeometry",
     "CGWindowLevel",

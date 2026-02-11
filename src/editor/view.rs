@@ -413,7 +413,7 @@ impl EditorView {
     pub fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
         let this = mtm.alloc().set_ivars(EditorViewIvars {
             current_image: RefCell::new(None),
-            active_tool: Cell::new(ActiveTool::Arrow),
+            active_tool: Cell::new(ActiveTool::Select),
             annotation_color: Cell::new((1.0, 0.0, 0.0)),
             current_annotation: RefCell::new(None),
             annotations_to_draw: RefCell::new(Vec::new()),

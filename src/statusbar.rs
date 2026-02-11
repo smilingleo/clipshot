@@ -50,12 +50,12 @@ impl StatusBar {
         );
         menu.addItem(&capture_item);
 
-        // Record Screen  (Ctrl+Cmd+V)
+        // Record Screen  (Ctrl+Cmd+Z)
         let record_item = create_menu_item(
             mtm,
             "Record Screen",
             c"startRecording:",
-            "v",
+            "z",
             ctrl_cmd,
         );
         menu.addItem(&record_item);

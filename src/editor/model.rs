@@ -47,12 +47,15 @@ impl EditorState {
     }
 
     /// Add an annotation at the given frame. Sets it as active and returns its index.
+    /// Default end frame is 1 second after start (capped at total frames).
     pub fn add_annotation(&mut self, annotation: Annotation, frame: usize) -> usize {
         self.redo_stack.clear();
+        let one_second = (self.fps.round() as usize).max(1);
+        let end = (frame + one_second).min(self.total_frames);
         let timed = TimedAnnotation {
             annotation,
             start_frame: frame,
-            end_frame: None,
+            end_frame: Some(end),
         };
         self.annotations.push(timed);
         let idx = self.annotations.len() - 1;

@@ -70,13 +70,14 @@ impl EditorWindow {
             (native_w, native_h)
         };
 
-        // For single-frame (stitched image) mode, cap height at screen height - 100
+        // Cap view size at 80% of screen dimensions, preserving aspect ratio
         let screen = crate::screen::screen_with_mouse(mtm);
-        let screen_height = screen.frame().size.height;
-        let max_view_h = screen_height - 100.0;
-        let (view_w, view_h) = if is_single_frame && view_h > max_view_h {
-            let scale = max_view_h / view_h;
-            ((view_w * scale).round(), max_view_h)
+        let screen_size = screen.frame().size;
+        let max_view_w = (screen_size.width * 0.8).round();
+        let max_view_h = (screen_size.height * 0.8).round();
+        let (view_w, view_h) = if view_w > max_view_w || view_h > max_view_h {
+            let scale = (max_view_w / view_w).min(max_view_h / view_h);
+            ((view_w * scale).round(), (view_h * scale).round())
         } else {
             (view_w, view_h)
         };
@@ -108,6 +109,20 @@ impl EditorWindow {
         };
         window.setTitle(&NSString::from_str(title));
         unsafe { window.setReleasedWhenClosed(false) };
+        window.setHasShadow(true);
+
+        // Add a visible border around the content area
+        if let Some(content_view) = window.contentView() {
+            content_view.setWantsLayer(true);
+            if let Some(layer) = content_view.layer() {
+                unsafe {
+                    let _: () = msg_send![&*layer, setBorderWidth: 1.0f64];
+                    let border_color = objc2_core_graphics::CGColor::new_srgb(0.5, 0.5, 0.5, 0.6);
+                    let _: () = msg_send![&*layer, setBorderColor: &*border_color];
+                }
+            }
+        }
+
         window.center();
 
         // Non-flipped layout (origin bottom-left):
@@ -479,13 +494,14 @@ impl EditorWindow {
             (native_w, native_h)
         };
 
-        // For single-frame mode, cap height at screen height - 100
+        // Cap view size at 80% of screen dimensions, preserving aspect ratio
         let screen = crate::screen::screen_with_mouse(mtm);
-        let screen_height = screen.frame().size.height;
-        let max_view_h = screen_height - 100.0;
-        let (view_w, view_h) = if self.is_single_frame && view_h > max_view_h {
-            let scale = max_view_h / view_h;
-            ((view_w * scale).round(), max_view_h)
+        let screen_size = screen.frame().size;
+        let max_view_w = (screen_size.width * 0.8).round();
+        let max_view_h = (screen_size.height * 0.8).round();
+        let (view_w, view_h) = if view_w > max_view_w || view_h > max_view_h {
+            let scale = (max_view_w / view_w).min(max_view_h / view_h);
+            ((view_w * scale).round(), (view_h * scale).round())
         } else {
             (view_w, view_h)
         };
