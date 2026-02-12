@@ -917,7 +917,15 @@ impl AppDelegate {
 
         if has_annotations {
             if let Err(e) =
-                crate::editor::export::export_with_annotations(&editor.decoder, annotations, &export_path)
+                crate::editor::export::export_with_annotations(
+                    &editor.decoder,
+                    annotations,
+                    &export_path,
+                    {
+                        let vb = editor.view.bounds();
+                        (vb.size.width, vb.size.height)
+                    },
+                )
             {
                 eprintln!("Export failed: {}", e);
                 drop(state);
@@ -1375,7 +1383,9 @@ impl AppDelegate {
 
         let width = editor.decoder.width();
         let height = editor.decoder.height();
-        let composited = crate::editor::export::composite_frame(source_image, &annotations, width, height);
+        let view_bounds = editor.view.bounds();
+        let view_size = (view_bounds.size.width, view_bounds.size.height);
+        let composited = crate::editor::export::composite_frame(source_image, &annotations, width, height, view_size);
 
         // Apply crop if present
         let crop_rect = editor.view.ivars().crop_rect.get();
@@ -1451,7 +1461,9 @@ impl AppDelegate {
             .collect();
         let width = editor.decoder.width();
         let height = editor.decoder.height();
-        let composited = crate::editor::export::composite_frame(source_image, &annotations, width, height);
+        let view_bounds = editor.view.bounds();
+        let view_size = (view_bounds.size.width, view_bounds.size.height);
+        let composited = crate::editor::export::composite_frame(source_image, &annotations, width, height, view_size);
         drop(state);
 
         let Some(composited) = composited else {

@@ -34,6 +34,7 @@ bundle: build icon
 	cp target/release/$(BINARY) $(MACOS)/
 	cp Info.plist $(CONTENTS)/
 	cp $(ICON_ICNS) $(RESOURCES)/
+	codesign --force --sign - --entitlements ClipShot.entitlements --deep $(BUNDLE)
 	@echo "Built $(BUNDLE)"
 
 install: bundle

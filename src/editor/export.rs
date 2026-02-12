@@ -11,10 +11,13 @@ use super::model::TimedAnnotation;
 use crate::encoder::VideoEncoder;
 
 /// Export the video with timed annotations composited onto frames.
+/// `view_size` is the editor view's bounds size (in points) — annotations are stored
+/// in this coordinate space and must be scaled to the video's pixel dimensions.
 pub fn export_with_annotations(
     decoder: &VideoDecoder,
     annotations: &[TimedAnnotation],
     output_path: &Path,
+    view_size: (CGFloat, CGFloat),
 ) -> Result<(), String> {
     let width = decoder.width();
     let height = decoder.height();
@@ -48,7 +51,7 @@ pub fn export_with_annotations(
             encoder.append_frame(source_image);
         } else {
             // Composite annotations onto the frame
-            let composited = composite_frame(source_image, &visible_annotations, width, height);
+            let composited = composite_frame(source_image, &visible_annotations, width, height, view_size);
             match composited {
                 Some(ref img) => {
                     encoder.append_frame(img);
@@ -67,11 +70,13 @@ pub fn export_with_annotations(
 }
 
 /// Draw annotations onto a source frame, producing a new CGImage.
+/// `view_size` is the editor view's bounds size — annotations use this coordinate space.
 pub(crate) fn composite_frame(
     source: &CGImage,
     annotations: &[&crate::annotation::model::Annotation],
     width: usize,
     height: usize,
+    view_size: (CGFloat, CGFloat),
 ) -> Option<objc2_core_foundation::CFRetained<CGImage>> {
     let color_space = CGColorSpace::new_device_rgb()?;
     let bitmap_info = CGImageAlphaInfo::PremultipliedLast.0;
@@ -100,6 +105,13 @@ pub(crate) fn composite_frame(
     // We need to flip the context so annotations render correctly.
     CGContext::translate_ctm(Some(&ctx), 0.0, height as CGFloat);
     CGContext::scale_ctm(Some(&ctx), 1.0, -1.0);
+
+    // Scale from editor view coordinates to video pixel coordinates.
+    // Annotations are stored in the editor view's coordinate space, which may differ
+    // from the video's native pixel dimensions (due to view scaling for screen fit).
+    let sx = width as CGFloat / view_size.0;
+    let sy = height as CGFloat / view_size.1;
+    CGContext::scale_ctm(Some(&ctx), sx, sy);
 
     for ann in annotations {
         crate::annotation::renderer::draw_annotation(&ctx, ann, Some(source));
