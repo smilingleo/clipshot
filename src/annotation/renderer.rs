@@ -158,7 +158,6 @@ fn draw_pencil(
     CGContext::restore_g_state(Some(ctx));
 }
 
-#[allow(deprecated)]
 fn draw_text(
     ctx: &CGContext,
     position: CGPoint,
@@ -166,43 +165,72 @@ fn draw_text(
     color: (CGFloat, CGFloat, CGFloat),
     font_size: CGFloat,
 ) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::NSString;
+
     CGContext::save_g_state(Some(ctx));
-    CGContext::set_rgb_fill_color(Some(ctx), color.0, color.1, color.2, 1.0);
 
-    let font_name = CString::new("Helvetica").unwrap();
     unsafe {
-        CGContext::select_font(
-            Some(ctx),
-            font_name.as_ptr(),
-            font_size,
-            objc2_core_graphics::CGTextEncoding::EncodingMacRoman,
-        );
+        // Wrap the CGContext in an NSGraphicsContext so NSString drawing works
+        // (needed for export paths that don't have a current NSGraphicsContext)
+        let prev_ctx: *mut AnyObject =
+            msg_send![objc2::class!(NSGraphicsContext), currentContext];
+        let ns_ctx: *mut AnyObject = msg_send![
+            objc2::class!(NSGraphicsContext),
+            graphicsContextWithCGContext: ctx,
+            flipped: true
+        ];
+        let _: () = msg_send![
+            objc2::class!(NSGraphicsContext),
+            setCurrentContext: ns_ctx
+        ];
+
+        // Create font and color
+        let font: *mut AnyObject =
+            msg_send![objc2::class!(NSFont), systemFontOfSize: font_size];
+        let ns_color: *mut AnyObject = msg_send![
+            objc2::class!(NSColor),
+            colorWithRed: color.0,
+            green: color.1,
+            blue: color.2,
+            alpha: 1.0 as CGFloat
+        ];
+
+        // Build attributes dictionary
+        let font_key = NSString::from_str("NSFont");
+        let color_key = NSString::from_str("NSColor");
+        let keys: [*const AnyObject; 2] =
+            [&*font_key as *const _ as *const _, &*color_key as *const _ as *const _];
+        let vals: [*const AnyObject; 2] = [font as *const _, ns_color as *const _];
+        let dict: *mut AnyObject = msg_send![
+            objc2::class!(NSDictionary),
+            dictionaryWithObjects: vals.as_ptr(),
+            forKeys: keys.as_ptr(),
+            count: 2usize
+        ];
+
+        let line_height = font_size * 1.3;
+        for (i, line) in text.split('\n').enumerate() {
+            let ns_line = NSString::from_str(line);
+            let point = CGPoint::new(
+                position.x,
+                position.y + (i as CGFloat) * line_height,
+            );
+            let _: () = msg_send![
+                &*ns_line,
+                drawAtPoint: point,
+                withAttributes: dict
+            ];
+        }
+
+        // Restore previous NSGraphicsContext
+        let _: () = msg_send![
+            objc2::class!(NSGraphicsContext),
+            setCurrentContext: prev_ctx
+        ];
     }
 
-    // Flip the text matrix for our flipped coordinate system
-    CGContext::set_text_matrix(
-        Some(ctx),
-        CGAffineTransform {
-            a: 1.0,
-            b: 0.0,
-            c: 0.0,
-            d: -1.0,
-            tx: 0.0,
-            ty: 0.0,
-        },
-    );
-
-    let c_text = CString::new(text).unwrap_or_else(|_| CString::new("?").unwrap());
-    let len = c_text.as_bytes().len();
-    unsafe {
-        CGContext::show_text_at_point(
-            Some(ctx),
-            position.x,
-            position.y + font_size,
-            c_text.as_ptr(),
-            len,
-        );
-    }
     CGContext::restore_g_state(Some(ctx));
 }
 

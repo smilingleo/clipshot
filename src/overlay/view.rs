@@ -3,12 +3,12 @@ use std::cell::{Cell, RefCell};
 use objc2::rc::Retained;
 use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSCursor, NSEvent, NSFont, NSGraphicsContext, NSImage, NSTextField, NSTrackingArea,
+    NSCursor, NSEvent, NSGraphicsContext, NSImage, NSTrackingArea,
     NSTrackingAreaOptions, NSView,
 };
 use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGContext;
-use objc2_foundation::{MainThreadMarker, NSRect, NSString};
+use objc2_foundation::{MainThreadMarker, NSRect};
 
 use crate::annotation::model::{Annotation, HandleKind};
 
@@ -63,8 +63,10 @@ pub struct OverlayViewIvars {
     pub current_annotation: RefCell<Option<Annotation>>,
     pub annotation_color: Cell<(CGFloat, CGFloat, CGFloat)>,
     pub tracking_area: RefCell<Option<Retained<NSTrackingArea>>>,
-    /// Active text field for text tool input
-    pub text_field: RefCell<Option<Retained<NSTextField>>>,
+    /// Container view for text tool input (dotted border)
+    pub text_container: RefCell<Option<Retained<NSView>>>,
+    /// Text view for text tool input (NSTextView inside container)
+    pub text_view: RefCell<Option<Retained<NSView>>>,
     /// Position where the text tool was clicked
     pub text_position: Cell<CGPoint>,
     /// Index of the currently selected annotation (for highlight + delete).
@@ -408,7 +410,7 @@ define_class!(
                 || flags.contains(objc2_app_kit::NSEventModifierFlags::Option);
 
             // Tool shortcuts (only when no text field active and no modifiers)
-            if !has_modifiers && self.ivars().text_field.borrow().is_none() {
+            if !has_modifiers && self.ivars().text_view.borrow().is_none() {
                 if let Some(tool) = tool_for_key(key_code) {
                     self.commit_text_field();
                     self.ivars().active_tool.set(tool);
@@ -465,6 +467,27 @@ define_class!(
             }
         }
 
+        /// Called by AnnotationTextView when Enter is pressed.
+        #[unsafe(method(commitTextInput))]
+        fn commit_text_input_action(&self) {
+            self.commit_text_field();
+        }
+
+        /// Called by AnnotationTextView when Escape is pressed.
+        #[unsafe(method(cancelTextInput))]
+        fn cancel_text_input_action(&self) {
+            // Discard text input without committing
+            let container = self.ivars().text_container.borrow_mut().take();
+            let _view = self.ivars().text_view.borrow_mut().take();
+            if let Some(container) = container {
+                container.removeFromSuperview();
+            }
+            self.setNeedsDisplay(true);
+            if let Some(window) = self.window() {
+                let _ = window.makeFirstResponder(Some(self));
+            }
+        }
+
         #[unsafe(method(resetCursorRects))]
         fn reset_cursor_rects(&self) {
             let bounds = self.bounds();
@@ -509,7 +532,8 @@ impl OverlayView {
             current_annotation: RefCell::new(None),
             annotation_color: Cell::new((1.0, 0.0, 0.0)),
             tracking_area: RefCell::new(None),
-            text_field: RefCell::new(None),
+            text_container: RefCell::new(None),
+            text_view: RefCell::new(None),
             text_position: Cell::new(CGPoint::ZERO),
             active_annotation_index: Cell::new(None),
             select_drag_mode: Cell::new(SelectDragMode::None),
@@ -692,30 +716,26 @@ impl OverlayView {
         self.commit_text_field();
 
         let mtm = MainThreadMarker::from(self);
-        let field_height = font_size * 1.5;
-        let frame = NSRect::new(point, CGSize::new(200.0, field_height));
-        let field = NSTextField::new(mtm);
-        field.setFrame(frame);
-        field.setFont(Some(&NSFont::systemFontOfSize(font_size)));
-        field.setDrawsBackground(true);
-        field.setBordered(true);
-        field.setStringValue(&NSString::from_str(initial_text));
+        let color = self.ivars().annotation_color.get();
+        let (container, text_view) =
+            crate::annotation::text_input::create_text_input(mtm, point, initial_text, font_size, color);
 
-        self.addSubview(&field);
+        self.addSubview(&container);
         if let Some(w) = self.window() {
-            w.makeFirstResponder(Some(&*field));
+            w.makeFirstResponder(Some(&*text_view));
         }
 
         self.ivars().text_position.set(point);
-        *self.ivars().text_field.borrow_mut() = Some(field);
+        *self.ivars().text_container.borrow_mut() = Some(container);
+        *self.ivars().text_view.borrow_mut() = Some(text_view);
     }
 
     /// Commit the current text field content as a Text annotation.
     pub fn commit_text_field(&self) {
-        let field = self.ivars().text_field.borrow_mut().take();
-        if let Some(field) = field {
-            let text = field.stringValue().to_string();
-            if !text.is_empty() {
+        let container = self.ivars().text_container.borrow_mut().take();
+        let text_view = self.ivars().text_view.borrow_mut().take();
+        if let (Some(container), Some(text_view)) = (container, text_view) {
+            if let Some(text) = crate::annotation::text_input::commit_text_input(&container, &text_view) {
                 let color = self.ivars().annotation_color.get();
                 let position = self.ivars().text_position.get();
                 let font_size = self.ivars().annotation_font_size.get();
@@ -727,9 +747,7 @@ impl OverlayView {
                     font_size,
                 });
             }
-            field.removeFromSuperview();
             self.setNeedsDisplay(true);
-            // Restore key responder to self
             if let Some(window) = self.window() {
                 let _ = window.makeFirstResponder(Some(self));
             }

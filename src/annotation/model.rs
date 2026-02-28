@@ -113,14 +113,8 @@ impl Annotation {
                 ), *width)
             }
             Annotation::Text { position, text, font_size, .. } => {
-                // Estimate text bounding box: ~0.6 * font_size per character width
-                let char_width = *font_size * 0.6;
-                let estimated_width = char_width * text.len() as CGFloat;
-                let estimated_height = *font_size * 1.2;
-                CGRect::new(
-                    *position,
-                    CGSize::new(estimated_width, estimated_height),
-                )
+                let size = measure_text_size(text, *font_size);
+                CGRect::new(*position, size)
             }
             Annotation::Highlight { origin, size, .. } => {
                 normalize_annotation_rect(*origin, *size)
@@ -325,4 +319,40 @@ fn inflate_rect(rect: CGRect, amount: CGFloat) -> CGRect {
         CGPoint::new(rect.origin.x - amount, rect.origin.y - amount),
         CGSize::new(rect.size.width + amount * 2.0, rect.size.height + amount * 2.0),
     )
+}
+
+/// Measure text size using NSAttributedString for accurate bounding rect.
+fn measure_text_size(text: &str, font_size: CGFloat) -> CGSize {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::NSString;
+
+    if text.is_empty() {
+        return CGSize::ZERO;
+    }
+
+    unsafe {
+        let font: *mut AnyObject =
+            msg_send![objc2::class!(NSFont), systemFontOfSize: font_size];
+        let font_key = NSString::from_str("NSFont");
+        let dict: *mut AnyObject = msg_send![
+            objc2::class!(NSDictionary),
+            dictionaryWithObject: font,
+            forKey: &*font_key
+        ];
+
+        let ns_str = NSString::from_str(text);
+        let max_size = CGSize::new(10000.0, 10000.0);
+        // NSStringDrawingUsesLineFragmentOrigin (1) | NSStringDrawingUsesFontLeading (2)
+        let options: usize = 3;
+        let context: *mut AnyObject = std::ptr::null_mut();
+        let result: CGRect = msg_send![
+            &*ns_str,
+            boundingRectWithSize: max_size,
+            options: options,
+            attributes: dict,
+            context: context
+        ];
+        CGSize::new(result.size.width.ceil(), result.size.height.ceil())
+    }
 }
